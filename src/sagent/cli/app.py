@@ -44,6 +44,24 @@ def _print_event(text: str) -> None:
     print(text, flush=True)
 
 
+def resolve_mode(args_mode: str | None, config_mode: str) -> str:
+    """确定最终执行模式：命令行 --mode 优先，否则回退到配置中的默认模式。"""
+    return args_mode or config_mode
+
+
+def build_engine(
+    mode: str,
+    llm: LLMClient,
+    registry,
+    agent_config,
+    on_event=None,
+) -> PlanEngine | ReActEngine:
+    """根据模式构建对应的执行引擎。"""
+    if mode == "plan":
+        return PlanEngine(llm, registry, agent_config, on_event=on_event)
+    return ReActEngine(llm, registry, agent_config, on_event=on_event)
+
+
 def run() -> int:
     """CLI 主入口，返回进程退出码。"""
     parser = _build_parser()
@@ -57,18 +75,13 @@ def run() -> int:
         return 1
 
     # 命令行 --mode 覆盖配置中的默认模式
-    mode = args.mode or config.agent.mode
+    mode = resolve_mode(args.mode, config.agent.mode)
 
     # 构建依赖
     llm = LLMClient(config.llm)
     registry = build_default_registry()
 
-    if mode == "plan":
-        engine: PlanEngine | ReActEngine = PlanEngine(
-            llm, registry, config.agent, on_event=_print_event
-        )
-    else:
-        engine = ReActEngine(llm, registry, config.agent, on_event=_print_event)
+    engine = build_engine(mode, llm, registry, config.agent, on_event=_print_event)
 
     tool_names = ", ".join(t.name for t in registry.list_tools())
     print("=" * 60)

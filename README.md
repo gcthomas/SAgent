@@ -80,7 +80,38 @@ src/sagent/
   tools/                    工具基类、注册表、内置工具
   core/                     ReAct 与 Plan 执行引擎、提示词
   cli/                      命令行应用
+tests/
+  conftest.py               公共 fixture 与 FakeLLMClient
+  unit/                     单元测试（配置、工具、注册表、Plan 解析，无需 LLM）
+  engines/                  引擎测试（ReAct / Plan，用 FakeLLMClient 离线回放）
+  evals/                    Agent 能力评测（离线回放 + 可选真实 LLM）
 ```
+
+## 测试
+
+安装开发依赖并运行测试：
+
+```powershell
+pip install -r requirements-dev.txt
+python -m pytest
+```
+
+测试分三层：
+
+- 单元测试：不依赖 LLM，覆盖配置加载、工具执行与容错、注册表、Plan 步骤解析。
+- 引擎测试：使用 `FakeLLMClient`（`tests/conftest.py`）按预设响应队列离线回放，验证 ReAct / Plan 的多轮编排逻辑，快速且可复现。
+- 能力评测（`tests/evals`）：以数据形式集中定义评测场景。默认走离线回放；设置 `RUN_LLM_EVALS=1` 并配置好真实 LLM 后，会调用真实模型执行任务并用 LLM-as-judge 打分。
+
+```powershell
+# 仅运行离线用例（默认，跳过真实 LLM 评测）
+python -m pytest
+
+# 启用真实 LLM 评测（需有效的 LLM_API_KEY / LLM_API_URL 与 config.yaml）
+$env:RUN_LLM_EVALS = "1"
+python -m pytest tests/evals
+```
+
+新增 Agent 能力时，在 `tests/evals/test_agent_evals.py` 的 `SCENARIOS` 中追加场景即可。
 
 ## 扩展说明
 
