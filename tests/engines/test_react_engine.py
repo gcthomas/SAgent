@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 from conftest import make_tool_call, text_response, tool_response
 
 from sagent.config.models import AgentConfig
@@ -18,7 +20,7 @@ def test_react_direct_answer(make_fake_llm, agent_config):
     assert len(llm.calls) == 1
 
 
-def test_react_tool_then_answer(make_fake_llm, agent_config, tmp_path):
+def test_react_tool_then_answer(make_fake_llm, agent_config, tmp_path, caplog):
     """第一轮请求工具，第二轮基于观察给出答案。"""
     target = tmp_path / "data.txt"
     target.write_text("文件内容", encoding="utf-8")
@@ -33,6 +35,9 @@ def test_react_tool_then_answer(make_fake_llm, agent_config, tmp_path):
     engine = ReActEngine(
         llm, build_default_registry(), agent_config, on_event=events.append
     )
+    # 激活 sagent logger 的 INFO 级别，确保日志记录路径被实际执行，
+    # 可捕获 extra 键与 LogRecord 保留属性冲突等错误
+    caplog.set_level(logging.INFO, logger="sagent")
     result = engine.run("读取文件")
 
     assert result == "文件内容已读取完毕"
@@ -44,6 +49,13 @@ def test_react_tool_then_answer(make_fake_llm, agent_config, tmp_path):
     # 过程事件包含行动与观察
     assert any("[行动]" in e for e in events)
     assert any("[观察]" in e for e in events)
+    # 验证工具执行日志被正确记录，extra 字段无保留属性冲突
+    tool_call_records = [
+        r for r in caplog.records if getattr(r, "event", None) == "tool_call"
+    ]
+    assert len(tool_call_records) >= 1
+    assert getattr(tool_call_records[0], "tool", None) == "read_file"
+    assert hasattr(tool_call_records[0], "tool_args")
 
 
 def test_react_hits_max_iterations(make_fake_llm):

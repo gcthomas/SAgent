@@ -78,7 +78,7 @@ class ToolRegistry:
 
         logger.info(
             "执行工具",
-            extra={"event": "tool_call", "tool": name, "args": parsed},
+            extra={"event": "tool_call", "tool": name, "tool_args": parsed},
         )
 
         # 校验参数
