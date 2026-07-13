@@ -22,3 +22,19 @@ agent:
   mode: "react"
   # ReAct 循环最大迭代次数
   max_iterations: 10
+
+logging:
+  # 是否启用日志系统
+  enabled: true
+  # 文件日志级别（DEBUG/INFO/WARNING/ERROR）
+  level: "DEBUG"
+  # 控制台日志级别
+  console_level: "INFO"
+  # 日志目录（相对运行目录）
+  dir: "logs"
+  # 日志主文件名（按天滚动，归档形如 sagent.log.2026-07-10）
+  file: "sagent.log"
+  # 按天滚动保留的历史份数
+  backup_count: 7
+  # 是否记录 LLM 完整请求/响应内容（关闭时仅记录摘要，避免体积过大与泄露敏感信息）
+  log_llm_content: false

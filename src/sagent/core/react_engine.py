@@ -10,8 +10,11 @@ from typing import Any, Callable
 
 from ..config.models import AgentConfig
 from ..llm.client import LLMClient
+from ..observability import get_logger
 from ..tools.registry import ToolRegistry
 from .prompts import REACT_SYSTEM_PROMPT
+
+logger = get_logger(__name__)
 
 
 class ReActEngine:
@@ -58,13 +61,26 @@ class ReActEngine:
         ]
         tools = self.registry.to_openai_schemas()
 
+        logger.info(
+            "ReAct 开始执行",
+            extra={"event": "react_start", "max_iterations": self.config.max_iterations},
+        )
+
         for iteration in range(1, self.config.max_iterations + 1):
+            logger.debug(
+                "ReAct 迭代",
+                extra={"event": "react_iteration", "iteration": iteration},
+            )
             response = self.llm.chat(messages, tools=tools)
 
             # 没有工具调用，视为最终答案
             if not response.has_tool_calls:
                 if response.content:
                     self._emit(f"[最终答案] {response.content}")
+                logger.info(
+                    "ReAct 得到最终答案",
+                    extra={"event": "react_final", "iteration": iteration},
+                )
                 return response.content or "（模型未返回内容）"
 
             # 记录助手消息（包含 tool_calls），供后续工具结果对齐
@@ -85,6 +101,10 @@ class ReActEngine:
 
         # 达到最大迭代次数仍未结束，进行最后一次无工具的收尾请求
         self._emit(f"[提示] 已达到最大迭代次数 {self.config.max_iterations}，尝试给出当前结论。")
+        logger.warning(
+            "ReAct 达到最大迭代次数",
+            extra={"event": "react_max_iterations", "max_iterations": self.config.max_iterations},
+        )
         final = self.llm.chat(messages, tools=None)
         return (
             final.content

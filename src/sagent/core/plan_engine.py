@@ -10,9 +10,12 @@ from typing import Any, Callable
 
 from ..config.models import AgentConfig
 from ..llm.client import LLMClient
+from ..observability import get_logger
 from ..tools.registry import ToolRegistry
 from .prompts import PLAN_DECOMPOSE_PROMPT, PLAN_SUMMARY_PROMPT
 from .react_engine import ReActEngine
+
+logger = get_logger(__name__)
 
 
 class PlanEngine:
@@ -42,15 +45,24 @@ class PlanEngine:
         if not steps:
             # 拆解失败时回退为直接用 ReAct 执行整个任务
             self._emit("[提示] 未能拆解出步骤，直接执行整个任务。")
+            logger.warning("Plan 拆解失败，回退 ReAct", extra={"event": "plan_fallback"})
             return self._react.run(task)
 
         self._emit(f"[计划] 共拆解为 {len(steps)} 个步骤：")
+        logger.info(
+            "Plan 拆解完成",
+            extra={"event": "plan_decomposed", "step_count": len(steps), "steps": steps},
+        )
         for idx, step in enumerate(steps, start=1):
             self._emit(f"  {idx}. {step}")
 
         step_results: list[str] = []
         for idx, step in enumerate(steps, start=1):
             self._emit(f"\n[执行步骤 {idx}/{len(steps)}] {step}")
+            logger.info(
+                "Plan 执行步骤",
+                extra={"event": "plan_step", "index": idx, "total": len(steps), "step": step},
+            )
             # 为每个步骤提供原始任务作为背景
             step_task = (
                 f"原始任务: {task}\n"
@@ -60,6 +72,7 @@ class PlanEngine:
             result = self._react.run(step_task)
             step_results.append(f"步骤 {idx}（{step}）结果:\n{result}")
 
+        logger.info("Plan 汇总结果", extra={"event": "plan_summarize"})
         return self._summarize(task, step_results)
 
     def _decompose(self, task: str) -> list[str]:

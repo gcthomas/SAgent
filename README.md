@@ -44,6 +44,14 @@ llm:
 agent:
   mode: "react"     # 默认模式：react 或 plan
   max_iterations: 10
+logging:
+  enabled: true
+  level: "DEBUG"          # 文件日志级别
+  console_level: "INFO"   # 控制台日志级别
+  dir: "logs"
+  file: "sagent.log"      # 按天滚动，归档为 sagent.log.2026-07-10
+  backup_count: 7
+  log_llm_content: false  # 是否记录 LLM 完整请求/响应内容
 ```
 
 环境变量覆盖（优先级高于配置文件）：
@@ -68,6 +76,21 @@ python main.py --config config.yaml --mode plan
 
 进入交互后输入问题即可对话，输入 `exit` 或 `quit` 退出。
 
+## 日志
+
+程序内置基于标准库 `logging` 的日志系统，记录从用户输入到 Agent 处理、LLM 调用、工具执行直至最终回复的完整运行轨迹，并对异常记录堆栈，便于事后定位。
+
+- **输出**：控制台输出简洁纯文本（默认 `INFO`）；文件日志写入 `logs/sagent.log`，为 **JSON 每行一条**（默认 `DEBUG`），按天滚动归档为 `sagent.log.2026-07-10`，并按 `backup_count` 自动清理。
+- **trace_id**：每次问答生成一个 8 位 `trace_id` 并注入当次全部日志，可用同一 id 检索整条链路。
+- **LLM 内容**：默认仅记录摘要（模型、消息条数、耗时、是否含工具调用等）；将 `logging.log_llm_content` 设为 `true` 后会记录完整请求/响应内容（注意体积与敏感信息）。
+- **调整级别**：通过 `logging.level` / `logging.console_level` 配置；设为 `false` 时用 `logging.enabled: false` 关闭。
+
+按某次问答的 trace_id 检索日志（PowerShell）：
+
+```powershell
+Select-String -Path logs/sagent.log -Pattern '"trace_id": "a1b2c3d4"'
+```
+
 ## 目录结构
 
 ```
@@ -79,6 +102,7 @@ src/sagent/
   llm/                      基于 openai SDK 的 LLM 客户端
   tools/                    工具基类、注册表、内置工具
   core/                     ReAct 与 Plan 执行引擎、提示词
+  observability/            日志系统（JSON 结构化、按天滚动、trace_id）
   cli/                      命令行应用
 tests/
   conftest.py               公共 fixture 与 FakeLLMClient

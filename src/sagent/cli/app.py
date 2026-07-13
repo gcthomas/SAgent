@@ -13,10 +13,13 @@ from ..config.loader import ConfigError, load_config
 from ..core.plan_engine import PlanEngine
 from ..core.react_engine import ReActEngine
 from ..llm.client import LLMClient
+from ..observability import get_logger, new_trace_id, setup_logging
 from ..tools import build_default_registry
 
 # 退出命令
 _EXIT_COMMANDS = {"exit", "quit", ":q"}
+
+logger = get_logger(__name__)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -74,6 +77,13 @@ def run() -> int:
         print(f"配置加载失败: {exc}", file=sys.stderr)
         return 1
 
+    # 初始化日志系统
+    setup_logging(config.logging)
+    logger.info(
+        "SAgent 启动",
+        extra={"event": "startup", "model": config.llm.model},
+    )
+
     # 命令行 --mode 覆盖配置中的默认模式
     mode = resolve_mode(args.mode, config.agent.mode)
 
@@ -103,14 +113,27 @@ def run() -> int:
             continue
         if user_input.lower() in _EXIT_COMMANDS:
             print("再见。")
+            logger.info("用户退出", extra={"event": "exit"})
             return 0
+
+        # 为本次问答生成 trace_id，串联整条链路
+        new_trace_id()
+        logger.info(
+            "收到用户输入",
+            extra={"event": "user_input", "input": user_input, "mode": mode},
+        )
 
         try:
             answer = engine.run(user_input)
         except Exception as exc:  # 捕获运行期异常，避免整个 CLI 崩溃
             print(f"执行出错: {exc}", file=sys.stderr)
+            logger.exception("执行出错", extra={"event": "run_error"})
             continue
 
+        logger.info(
+            "生成最终回复",
+            extra={"event": "final_answer", "answer_length": len(answer)},
+        )
         print(f"\n助手 > {answer}")
 
 

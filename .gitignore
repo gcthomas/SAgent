@@ -123,6 +123,9 @@ cython_debug/
 # 本地配置文件（可能包含密钥）
 config.yaml
 
+# 日志文件
+logs/
+
 # 操作系统
 .DS_Store
 Thumbs.db

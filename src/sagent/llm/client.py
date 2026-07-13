@@ -6,11 +6,15 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 from openai import OpenAI
 
 from ..config.models import LLMConfig
+from ..observability import get_logger, log_llm_content_enabled
+
+logger = get_logger(__name__)
 
 
 class LLMResponse:
@@ -70,7 +74,31 @@ class LLMClient:
             kwargs["tools"] = tools
             kwargs["tool_choice"] = "auto"
 
-        completion = self._client.chat.completions.create(**kwargs)
+        # 记录请求：默认仅摘要，开关开启时附完整 messages
+        request_extra: dict[str, Any] = {
+            "event": "llm_request",
+            "model": self.config.model,
+            "message_count": len(messages),
+            "tool_count": len(tools) if tools else 0,
+        }
+        if log_llm_content_enabled():
+            request_extra["messages"] = messages
+        logger.info("发起 LLM 请求", extra=request_extra)
+
+        start = time.perf_counter()
+        try:
+            completion = self._client.chat.completions.create(**kwargs)
+        except Exception:
+            logger.exception(
+                "LLM 请求失败",
+                extra={
+                    "event": "llm_error",
+                    "model": self.config.model,
+                    "latency_ms": round((time.perf_counter() - start) * 1000, 1),
+                },
+            )
+            raise
+        latency_ms = round((time.perf_counter() - start) * 1000, 1)
         message = completion.choices[0].message
 
         content = message.content or ""
@@ -85,5 +113,35 @@ class LLMClient:
                         "arguments": call.function.arguments,
                     }
                 )
+
+        # 记录响应：默认仅摘要，开关开启时附完整内容
+        response_extra: dict[str, Any] = {
+            "event": "llm_response",
+            "model": self.config.model,
+            "latency_ms": latency_ms,
+            "content_length": len(content),
+            "has_tool_calls": len(tool_calls) > 0,
+            "tool_call_count": len(tool_calls),
+        }
+        # 记录 token 用量（并非所有 OpenAI 兼容服务都返回 usage，需容错）
+        usage = getattr(completion, "usage", None)
+        if usage is not None:
+            response_extra["input_tokens"] = usage.prompt_tokens
+            response_extra["output_tokens"] = usage.completion_tokens
+            response_extra["total_tokens"] = usage.total_tokens
+            prompt_details = getattr(usage, "prompt_tokens_details", None)
+            if prompt_details is not None:
+                cached = getattr(prompt_details, "cached_tokens", None)
+                if cached is not None:
+                    response_extra["cached_tokens"] = cached
+            completion_details = getattr(usage, "completion_tokens_details", None)
+            if completion_details is not None:
+                reasoning = getattr(completion_details, "reasoning_tokens", None)
+                if reasoning is not None:
+                    response_extra["reasoning_tokens"] = reasoning
+        if log_llm_content_enabled():
+            response_extra["content"] = content
+            response_extra["tool_calls"] = tool_calls
+        logger.info("收到 LLM 响应", extra=response_extra)
 
         return LLMResponse(content=content, tool_calls=tool_calls, raw_message=message)

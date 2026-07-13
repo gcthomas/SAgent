@@ -7,9 +7,13 @@
 from __future__ import annotations
 
 import json
+import time
 from typing import Any
 
+from ..observability import get_logger
 from .base import Tool, ToolProvider
+
+logger = get_logger(__name__)
 
 
 class ToolRegistry:
@@ -53,6 +57,10 @@ class ToolRegistry:
         """
         tool = self.get(name)
         if tool is None:
+            logger.error(
+                "未找到工具",
+                extra={"event": "tool_not_found", "tool": name},
+            )
             return f"错误: 未找到名为 '{name}' 的工具。"
 
         # 解析参数
@@ -60,18 +68,51 @@ class ToolRegistry:
             try:
                 parsed = json.loads(arguments) if arguments.strip() else {}
             except json.JSONDecodeError as exc:
+                logger.error(
+                    "工具参数非法 JSON",
+                    extra={"event": "tool_bad_args", "tool": name},
+                )
                 return f"错误: 工具 '{name}' 的参数不是合法 JSON: {exc}"
         else:
             parsed = arguments
+
+        logger.info(
+            "执行工具",
+            extra={"event": "tool_call", "tool": name, "args": parsed},
+        )
 
         # 校验参数
         try:
             args_model = tool.validate_args(parsed)
         except Exception as exc:  # pydantic 校验错误等
+            logger.exception(
+                "工具参数校验失败",
+                extra={"event": "tool_validate_error", "tool": name},
+            )
             return f"错误: 工具 '{name}' 的参数校验失败: {exc}"
 
         # 执行
+        start = time.perf_counter()
         try:
-            return tool.run(args_model)
+            result = tool.run(args_model)
         except Exception as exc:  # 工具执行期异常
+            logger.exception(
+                "工具执行失败",
+                extra={
+                    "event": "tool_error",
+                    "tool": name,
+                    "latency_ms": round((time.perf_counter() - start) * 1000, 1),
+                },
+            )
             return f"错误: 工具 '{name}' 执行失败: {exc}"
+
+        logger.info(
+            "工具执行完成",
+            extra={
+                "event": "tool_result",
+                "tool": name,
+                "latency_ms": round((time.perf_counter() - start) * 1000, 1),
+                "result_length": len(result),
+            },
+        )
+        return result
