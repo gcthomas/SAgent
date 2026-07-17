@@ -24,12 +24,21 @@ class LLMResponse:
         content: 助手返回的文本内容，可能为空字符串。
         tool_calls: 工具调用列表，每个元素为 dict，包含 id、name、arguments（原始 JSON 字符串）。
         raw_message: openai SDK 返回的原始 message 对象，供构造消息历史使用。
+        usage: LLM API 返回的 token 用量，形如 {"prompt_tokens": N, "completion_tokens": M, "total_tokens": T}；
+               部分 OpenAI 兼容服务不返回 usage，此时为 None。
     """
 
-    def __init__(self, content: str, tool_calls: list[dict[str, Any]], raw_message: Any):
+    def __init__(
+        self,
+        content: str,
+        tool_calls: list[dict[str, Any]],
+        raw_message: Any,
+        usage: dict[str, int] | None = None,
+    ):
         self.content = content
         self.tool_calls = tool_calls
         self.raw_message = raw_message
+        self.usage = usage
 
     @property
     def has_tool_calls(self) -> bool:
@@ -125,10 +134,16 @@ class LLMClient:
         }
         # 记录 token 用量（并非所有 OpenAI 兼容服务都返回 usage，需容错）
         usage = getattr(completion, "usage", None)
+        usage_dict: dict[str, int] | None = None
         if usage is not None:
             response_extra["input_tokens"] = usage.prompt_tokens
             response_extra["output_tokens"] = usage.completion_tokens
             response_extra["total_tokens"] = usage.total_tokens
+            usage_dict = {
+                "prompt_tokens": usage.prompt_tokens,
+                "completion_tokens": usage.completion_tokens,
+                "total_tokens": usage.total_tokens,
+            }
             prompt_details = getattr(usage, "prompt_tokens_details", None)
             if prompt_details is not None:
                 cached = getattr(prompt_details, "cached_tokens", None)
@@ -144,4 +159,4 @@ class LLMClient:
             response_extra["tool_calls"] = tool_calls
         logger.info("收到 LLM 响应", extra=response_extra)
 
-        return LLMResponse(content=content, tool_calls=tool_calls, raw_message=message)
+        return LLMResponse(content=content, tool_calls=tool_calls, raw_message=message, usage=usage_dict)

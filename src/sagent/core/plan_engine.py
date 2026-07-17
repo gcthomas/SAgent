@@ -9,10 +9,11 @@ import json
 from typing import Any, Callable
 
 from ..config.models import AgentConfig
+from ..context.context_manager import ContextManager
 from ..llm.client import LLMClient
 from ..observability import get_logger
 from ..tools.registry import ToolRegistry
-from .prompts import PLAN_DECOMPOSE_PROMPT, PLAN_SUMMARY_PROMPT
+from .prompts import PLAN_DECOMPOSE_PROMPT, PLAN_SUMMARY_PROMPT, REACT_SYSTEM_PROMPT
 from .react_engine import ReActEngine
 
 logger = get_logger(__name__)
@@ -27,13 +28,15 @@ class PlanEngine:
         registry: ToolRegistry,
         agent_config: AgentConfig,
         on_event: Callable[[str], None] | None = None,
+        context_manager: ContextManager | None = None,
     ) -> None:
         self.llm = llm
         self.registry = registry
         self.config = agent_config
         self._on_event = on_event
-        # 每个步骤复用 ReAct 引擎执行
-        self._react = ReActEngine(llm, registry, agent_config, on_event)
+        self._context_manager = context_manager
+        # 每个步骤复用 ReAct 引擎执行，传入 context_manager 实现上下文持久化
+        self._react = ReActEngine(llm, registry, agent_config, on_event, context_manager=context_manager)
 
     def _emit(self, text: str) -> None:
         if self._on_event:
@@ -41,6 +44,11 @@ class PlanEngine:
 
     def run(self, task: str) -> str:
         """执行 Plan 模式任务：拆解 -> 分步执行 -> 汇总。"""
+        # 注入了上下文管理器时，确保系统提示词在上下文中并添加用户原始任务
+        if self._context_manager is not None:
+            self._context_manager.ensure_system_prompt(REACT_SYSTEM_PROMPT)
+            self._context_manager.add_message({"role": "user", "content": task})
+
         steps = self._decompose(task)
         if not steps:
             # 拆解失败时回退为直接用 ReAct 执行整个任务
@@ -73,7 +81,13 @@ class PlanEngine:
             step_results.append(f"步骤 {idx}（{step}）结果:\n{result}")
 
         logger.info("Plan 汇总结果", extra={"event": "plan_summarize"})
-        return self._summarize(task, step_results)
+        summary = self._summarize(task, step_results)
+
+        # 汇总完成后，将最终结果添加到上下文作为 assistant 消息
+        if self._context_manager is not None:
+            self._context_manager.add_message({"role": "assistant", "content": summary})
+
+        return summary
 
     def _decompose(self, task: str) -> list[str]:
         """调用 LLM 将任务拆解为步骤列表。解析失败返回空列表。"""

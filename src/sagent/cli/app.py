@@ -10,7 +10,9 @@ import argparse
 import sys
 
 from ..config.loader import ConfigError, load_config
+from ..context.context_manager import ContextManager
 from ..core.plan_engine import PlanEngine
+from ..core.prompts import REACT_SYSTEM_PROMPT
 from ..core.react_engine import ReActEngine
 from ..llm.client import LLMClient
 from ..observability import get_logger, new_trace_id, setup_logging
@@ -58,11 +60,12 @@ def build_engine(
     registry,
     agent_config,
     on_event=None,
+    context_manager=None,
 ) -> PlanEngine | ReActEngine:
     """根据模式构建对应的执行引擎。"""
     if mode == "plan":
-        return PlanEngine(llm, registry, agent_config, on_event=on_event)
-    return ReActEngine(llm, registry, agent_config, on_event=on_event)
+        return PlanEngine(llm, registry, agent_config, on_event=on_event, context_manager=context_manager)
+    return ReActEngine(llm, registry, agent_config, on_event=on_event, context_manager=context_manager)
 
 
 def run() -> int:
@@ -90,8 +93,12 @@ def run() -> int:
     # 构建依赖
     llm = LLMClient(config.llm)
     registry = build_default_registry()
+    context_manager = ContextManager(config.context, llm, config.llm.model)
 
-    engine = build_engine(mode, llm, registry, config.agent, on_event=_print_event)
+    engine = build_engine(
+        mode, llm, registry, config.agent, on_event=_print_event,
+        context_manager=context_manager,
+    )
 
     tool_names = ", ".join(t.name for t in registry.list_tools())
     print("=" * 60)

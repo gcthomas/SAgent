@@ -3,6 +3,7 @@
 # 说明：api_key 与 base_url 也可通过环境变量覆盖：
 #   LLM_API_KEY 覆盖 llm.api_key
 #   LLM_API_URL 覆盖 llm.base_url（用于对接 OpenAI 兼容的其他 LLM 服务）
+# context 段为可选配置，缺省时使用默认值
 
 llm:
   # 模型名称，例如 gpt-4o-mini、deepseek-chat、qwen-plus 等
@@ -38,3 +39,24 @@ logging:
   backup_count: 7
   # 是否记录 LLM 完整请求/响应内容（关闭时仅记录摘要，避免体积过大与泄露敏感信息）
   log_llm_content: false
+
+context:
+  # 模型上下文窗口大小（token 数），按所用模型实际窗口填写
+  max_context_tokens: 128000
+  # 触发压缩的阈值占比（当前 token / max_context_tokens 超过此值时触发压缩）
+  compression_threshold: 0.7
+  # 安全线：压缩持续执行直到 token 降至 max_context_tokens * safe_threshold 以下
+  safe_threshold: 0.5
+  # 始终保留的最近消息条数（第四层滑动窗口裁剪使用）
+  keep_recent_messages: 20
+  # 单条工具结果的最大 token 数，超过则截断（第一层工具输出截断使用）
+  max_tool_output_tokens: 2000
+  # token 计数方式：auto（自动选择）/ tiktoken（精确）/ heuristic（字符启发式）
+  token_counter_method: "auto"
+  # 是否使用 LLM API 返回的 prompt_tokens 做混合校准
+  # 启用后每次 LLM 调用自动记录精确 token 数，新增消息仅估算 delta，精度更高且不依赖 tiktoken
+  use_api_calibration: true
+  # 是否启用第三层 LLM 摘要压缩
+  enable_summary: true
+  # 第三层 LLM 摘要压缩生成的摘要最大 token 数（注入摘要提示词约束 LLM 输出长度）
+  summary_max_tokens: 500

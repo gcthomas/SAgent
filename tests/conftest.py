@@ -33,14 +33,25 @@ def make_tool_call(name: str, arguments: dict[str, Any] | str, call_id: str | No
     }
 
 
-def text_response(content: str) -> LLMResponse:
-    """构造一个纯文本响应（无工具调用）。"""
-    return LLMResponse(content=content, tool_calls=[], raw_message={"role": "assistant", "content": content})
+def text_response(content: str, usage: dict[str, int] | None = None) -> LLMResponse:
+    """构造一个纯文本响应（无工具调用）。
+
+    参数:
+        content: 助手返回的文本内容。
+        usage: 可选的 token 用量，形如 {"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120}。
+    """
+    return LLMResponse(content=content, tool_calls=[], raw_message={"role": "assistant", "content": content}, usage=usage)
 
 
-def tool_response(tool_calls: list[dict[str, Any]], content: str = "") -> LLMResponse:
-    """构造一个带工具调用的响应。"""
-    return LLMResponse(content=content, tool_calls=tool_calls, raw_message={"role": "assistant", "content": content})
+def tool_response(tool_calls: list[dict[str, Any]], content: str = "", usage: dict[str, int] | None = None) -> LLMResponse:
+    """构造一个带工具调用的响应。
+
+    参数:
+        tool_calls: 工具调用列表。
+        content: 助手返回的文本内容（通常为空）。
+        usage: 可选的 token 用量。
+    """
+    return LLMResponse(content=content, tool_calls=tool_calls, raw_message={"role": "assistant", "content": content}, usage=usage)
 
 
 class FakeLLMClient:

@@ -12,6 +12,7 @@
   - 内置工具：`read_file`、`write_file`、`run_shell`
   - 预留 `ToolProvider` 接口，供未来接入 MCP / skill
 - 兼容任意 OpenAI 兼容的 LLM 服务（通过 base_url 指定）
+- 上下文管理：自动追踪 token 用量，超阈值时分层压缩（截断 → 卸载 → 摘要 → 裁剪），支持 API 精确 token 校准
 - 配置集中在 YAML 文件
 
 ## 环境要求
@@ -52,6 +53,16 @@ logging:
   file: "sagent.log"      # 按天滚动，归档为 sagent.log.2026-07-10
   backup_count: 7
   log_llm_content: false  # 是否记录 LLM 完整请求/响应内容
+context:
+  max_context_tokens: 128000     # 模型上下文窗口大小（token）
+  compression_threshold: 0.7     # 触发压缩的阈值占比
+  safe_threshold: 0.5            # 压缩目标安全线占比
+  keep_recent_messages: 20       # 始终保留的最近消息条数
+  max_tool_output_tokens: 2000   # 单条工具结果最大 token 数
+  token_counter_method: "auto"   # 计数方式：auto/tiktoken/heuristic
+  use_api_calibration: true      # 使用 API 返回的 prompt_tokens 做混合校准
+  enable_summary: true           # 启用第三层 LLM 摘要压缩
+  summary_max_tokens: 500        # 摘要最大 token 数（注入提示词约束 LLM 输出）
 ```
 
 环境变量覆盖（优先级高于配置文件）：
@@ -91,6 +102,27 @@ python main.py --config config.yaml --mode plan
 Select-String -Path logs/sagent.log -Pattern '"trace_id": "a1b2c3d4"'
 ```
 
+## 上下文管理
+
+Agent 运行过程中消息历史不断增长，超过模型上下文窗口会导致请求失败。内置上下文管理器自动追踪 token 用量，在超阈值时执行分层压缩，保证发送给 LLM 的消息始终在安全范围内。
+
+**四层压缩策略**（低成本操作 → 语义保留 → 兜底裁剪，依次执行，每层执行后检查是否已达安全线）：
+
+| 层级 | 策略 | 说明 |
+|------|------|------|
+| 第一层 | 工具输出截断 | 截断过长的工具结果内容（保留头尾），信息无损 |
+| 第二层 | 工具消息卸载 | 将过期工具调用/结果对替换为简短摘要，轻度信息损失 |
+| 第三层 | LLM 摘要压缩 | 调用 LLM 对旧消息生成摘要替换原消息，语义保留 |
+| 第四层 | 滑动窗口裁剪 | 兜底：仅保留 system 消息与最近 N 条消息（裁剪边界自动对齐 tool_call/tool_result pair） |
+
+**Token 计数与混合校准**：
+
+- 支持三种计数方式：`auto`（优先 tiktoken，回退启发式）、`tiktoken`、`heuristic`（字符启发式）
+- 启用 `use_api_calibration`（默认开启）后，每次 LLM 调用返回的 `prompt_tokens` 作为精确基准，新增消息仅估算 delta，总量 = 精确基准 + 估算 delta，精度更高且不依赖 tiktoken
+- 压缩触发时自动重置校准基准，下次 LLM 调用后重新校准
+
+触发压缩与停止的阈值由 `compression_threshold` 与 `safe_threshold` 控制（相对 `max_context_tokens` 的占比）。`context` 段为可选配置，缺省时使用默认值。
+
 ## 目录结构
 
 ```
@@ -102,11 +134,12 @@ src/sagent/
   llm/                      基于 openai SDK 的 LLM 客户端
   tools/                    工具基类、注册表、内置工具
   core/                     ReAct 与 Plan 执行引擎、提示词
+  context/                  上下文管理：token 估算、分层压缩、上下文管理器
   observability/            日志系统（JSON 结构化、按天滚动、trace_id）
   cli/                      命令行应用
 tests/
   conftest.py               公共 fixture 与 FakeLLMClient
-  unit/                     单元测试（配置、工具、注册表、Plan 解析，无需 LLM）
+  unit/                     单元测试（配置、工具、注册表、Plan 解析、上下文管理，无需 LLM）
   engines/                  引擎测试（ReAct / Plan，用 FakeLLMClient 离线回放）
   evals/                    Agent 能力评测（离线回放 + 可选真实 LLM）
 ```
@@ -140,4 +173,5 @@ python -m pytest tests/evals
 ## 扩展说明
 
 - 新增工具：继承 `sagent.tools.base.Tool`，定义 `name`、`description`、`args_schema` 与 `run`，再注册到 `ToolRegistry`。
+- 新增压缩策略：继承 `sagent.context.strategies.CompressionStrategy`，实现 `compress(messages) -> list`，在 `ContextManager` 中集成。
 - MCP / skill：实现 `sagent.tools.base.ToolProvider` 接口，通过 `ToolRegistry.register_provider` 接入（当前仅预留接口）。

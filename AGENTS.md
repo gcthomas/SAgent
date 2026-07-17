@@ -12,6 +12,7 @@
 - **架构说明**：
   - 两种执行模式：ReAct（推理-行动-观察循环）、Plan（拆解-逐步执行-汇总）
   - 工具系统基于 pydantic 定义参数 schema，对接 LLM function calling
+  - 上下文管理：自动追踪 token 用量，超阈值时分层压缩（截断→卸载→摘要→裁剪），支持 API 精确 token 校准
   - 兼容任意 OpenAI 兼容的 LLM 服务（通过 base_url 指定）
   - 配置集中在 YAML 文件，敏感项支持环境变量覆盖
   - 内置 JSON 结构化日志，按天滚动，带 trace_id 全链路关联
@@ -79,13 +80,18 @@ pytest.ini                  pytest 配置（pythonpath=src，testpaths=tests）
 src/sagent/
   cli/app.py                CLI 应用：参数解析、交互循环、引擎构建
   config/
-    models.py               配置模型（pydantic）：LLMConfig、AgentConfig、LoggingConfig、AppConfig
+    models.py               配置模型（pydantic）：LLMConfig、AgentConfig、LoggingConfig、ContextConfig、AppConfig
     loader.py               YAML 配置加载 + 环境变量覆盖 + 校验
-  llm/client.py             LLM 客户端：封装 openai SDK，统一 LLMResponse 结构
+  llm/client.py             LLM 客户端：封装 openai SDK，统一 LLMResponse 结构（含 usage 字段）
   core/
-    react_engine.py         ReAct 引擎：推理-工具调用-观察循环
+    react_engine.py         ReAct 引擎：推理-工具调用-观察循环（集成上下文管理）
     plan_engine.py          Plan 引擎：拆解-逐步执行(复用 ReAct)-汇总
     prompts.py              系统提示词定义
+  context/
+    token_counter.py        Token 估算器：tiktoken 精确 / 字符启发式 / auto 自动回退
+    strategies.py           分层压缩策略：截断、卸载、摘要、裁剪
+    context_manager.py      上下文管理器：消息维护、token 追踪、触发压缩、混合校准
+    prompts.py              摘要压缩系统提示词
   tools/
     base.py                 Tool 抽象基类 + ToolProvider 接口（预留 MCP/skill）
     registry.py             ToolRegistry：注册、schema 输出、按名称执行
@@ -95,8 +101,8 @@ src/sagent/
   observability/
     logging_setup.py        JSON 结构化日志、按天滚动、trace_id 上下文关联
 tests/
-  conftest.py               公共 fixture：FakeLLMClient、make_tool_call、text_response
-  unit/                     单元测试（配置、工具、注册表、Plan 解析，无需 LLM）
+  conftest.py               公共 fixture：FakeLLMClient、make_tool_call、text_response（支持 usage）
+  unit/                     单元测试（配置、工具、注册表、Plan 解析、上下文管理，无需 LLM）
   engines/                  引擎测试（ReAct / Plan，用 FakeLLMClient 离线回放）
   evals/                    Agent 能力评测（离线回放 + 可选真实 LLM）
 ```
@@ -106,7 +112,10 @@ tests/
 - **`src/sagent/core/react_engine.py`**：ReAct 执行引擎，核心循环逻辑。`run()` 方法是主入口，调用 LLM → 判断是否工具调用 → 执行工具 → 追加观察 → 继续，直到得到最终答案或达到 `max_iterations` 上限。
 - **`src/sagent/core/plan_engine.py`**：Plan 执行引擎。先调用 LLM 拆解任务为 JSON 步骤列表，每步复用 ReAct 引擎执行，最后汇总。
 - **`src/sagent/tools/registry.py`**：工具注册表。**关键**：`execute()` 对未知工具、参数错误、执行异常均做容错处理，返回以"错误:"开头的字符串而不抛异常（避免 Agent 流程中断）。
-- **`src/sagent/llm/client.py`**：LLM 客户端。封装 openai SDK，统一返回 `LLMResponse`（含 content、tool_calls）。记录请求/响应日志，默认仅摘要。
+- **`src/sagent/llm/client.py`**：LLM 客户端。封装 openai SDK，统一返回 `LLMResponse`（含 content、tool_calls、usage）。记录请求/响应日志，默认仅摘要。`usage` 字段暴露 API 返回的 `prompt_tokens` / `completion_tokens` / `total_tokens`，供上下文管理器做混合校准。
+- **`src/sagent/context/context_manager.py`**：上下文管理器。维护消息历史，自动追踪 token 用量，超阈值时触发分层压缩。关键方法：`add_message()` 添加消息（对 tool 结果立即内联截断）、`get_messages()` 获取消息（超阈值自动压缩）、`record_llm_usage()` 记录 API 返回的精确 token 数用于混合校准、`token_count` 属性返回当前估算 token 数（混合校准模式 = 精确基准 + delta）。压缩触发时重置校准基准。
+- **`src/sagent/context/strategies.py`**：分层压缩策略。四层依次为：ToolOutputTruncation（截断过长工具输出）、ToolMessageOffload（卸载过期工具消息对）、LLMSummaryCompression（LLM 生成摘要替换旧消息）、SlidingWindowPruning（兜底裁剪，裁剪边界自动对齐 tool_call/tool_result pair 防止孤儿消息）。所有策略实现 `CompressionStrategy` 接口，返回新列表不修改原列表。
+- **`src/sagent/context/token_counter.py`**：Token 估算器。`count_tokens()` 对 OpenAI 消息列表估算总 token（含 tool_calls 开销与格式开销）；`count_text_tokens()` 对单段文本估算。支持 auto/tiktoken/heuristic 三种方式。
 - **`src/sagent/observability/logging_setup.py`**：日志系统。文件日志为 JSON 每行一条，按天滚动；控制台为纯文本。每次问答生成 trace_id 注入全部日志。
 
 ## 代码规范
@@ -128,6 +137,8 @@ tests/
 ### 配置与数据建模
 
 - 配置结构使用 pydantic `BaseModel`，字段带 `Field(..., description=...)`
+- 配置模型包括：`LLMConfig`、`AgentConfig`、`LoggingConfig`、`ContextConfig`（上下文管理）、`AppConfig`（顶层聚合）
+- `ContextConfig` 控制 token 预算（`max_context_tokens`）、压缩阈值（`compression_threshold` / `safe_threshold`）、压缩策略参数（`keep_recent_messages`、`max_tool_output_tokens`、`enable_summary`、`summary_max_tokens`）、token 计数方式（`token_counter_method`）、混合校准开关（`use_api_calibration`）
 - 工具参数使用 pydantic 模型定义 `args_schema`，自动生成 JSON schema 供 function calling
 
 ### 日志
@@ -158,7 +169,7 @@ tests/
 
 ### 测试分层
 
-1. **单元测试**（`tests/unit/`）：不依赖 LLM，覆盖配置加载、工具执行与容错、注册表、Plan 步骤解析
+1. **单元测试**（`tests/unit/`）：不依赖 LLM，覆盖配置加载、工具执行与容错、注册表、Plan 步骤解析、上下文管理（压缩策略、token 计数、混合校准）
 2. **引擎测试**（`tests/engines/`）：使用 `FakeLLMClient` 按预设响应队列离线回放，验证 ReAct / Plan 多轮编排逻辑，快速且可复现
 3. **能力评测**（`tests/evals/`）：以数据形式集中定义评测场景。默认走离线回放；设置 `RUN_LLM_EVALS=1` 调用真实模型并用 LLM-as-judge 打分
 
@@ -168,8 +179,8 @@ tests/
 
 辅助构造函数：
 - `make_tool_call(name, arguments, call_id)` - 构造 tool_call dict
-- `text_response(content)` - 纯文本响应
-- `tool_response(tool_calls, content)` - 带工具调用的响应
+- `text_response(content, usage=None)` - 纯文本响应（可选传入 usage 模拟 API 返回的 token 用量）
+- `tool_response(tool_calls, content="", usage=None)` - 带工具调用的响应（可选传入 usage）
 
 ### 评测场景
 
@@ -184,10 +195,19 @@ tests/
 - **LLM 内容记录**：将 `config.yaml` 中 `logging.log_llm_content` 设为 `true` 可记录完整请求/响应（注意体积与敏感信息）
 - **离线调试引擎**：使用 `FakeLLMClient` 构造预设响应序列，可在不调用真实模型的情况下调试 ReAct / Plan 编排逻辑
 - **配置问题**：`LLM_API_KEY` / `LLM_API_URL` 环境变量优先级高于配置文件；缺失 API Key 会抛 `ConfigError`
+- **上下文管理调试**：混合校准的关键日志事件可通过 `event` 字段过滤：
+  - `calibration_recorded`（INFO）：LLM 调用后记录精确基准
+  - `calibration_delta`（DEBUG）：每次 token 估算的基准 + delta 计算
+  - `calibration_reset`（INFO）：压缩触发时重置基准
+  - `context_compress_start` / `context_compress_done`：压缩触发与各层完成
+  ```powershell
+  Select-String -Path logs/sagent.log -Pattern '"event": "calibration'
+  ```
 
 ## 扩展说明
 
 - **新增工具**：详见"代码规范 > 工具开发约定"章节
+- **新增压缩策略**：继承 `sagent.context.strategies.CompressionStrategy`，实现 `compress(messages) -> list`，在 `ContextManager.__init__` 中实例化并在 `_compress()` 中按需调用
 - **MCP / skill 接入**：实现 `sagent.tools.base.ToolProvider` 接口，通过 `ToolRegistry.register_provider()` 接入（当前仅预留接口）
 - **新增执行模式**：参考 `ReActEngine` / `PlanEngine` 实现引擎类，在 `cli/app.py` 的 `build_engine()` 中添加分支
 
