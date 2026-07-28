@@ -49,6 +49,8 @@ class ContextManager:
         self._model = model
         self._messages: list[dict[str, Any]] = []
         self._existing_summary: str | None = None  # 已有的历史摘要
+        self._seq_counter: int = 0  # 会话内单调递增序号
+        self._on_compaction = None  # 压缩摘要事件回调，签名: callback(summary, covered_from_seq, covered_to_seq)
 
         # 混合校准：记录 LLM API 返回的精确 prompt_tokens 及基准时刻的消息数
         self._calibrated_tokens: int | None = None
@@ -73,6 +75,9 @@ class ContextManager:
         参数:
             message: OpenAI 格式的消息字典
         """
+        # 分配会话内单调递增 seq（不修改原入参字典，创建新字典）
+        self._seq_counter += 1
+        message = {**message, "seq": self._seq_counter}
         # 如果是 tool 消息，应用第一层截断
         if message.get("role") == "tool":
             truncated = self._truncation.compress([message])
@@ -220,6 +225,17 @@ class ContextManager:
             try:
                 summary = self._summarizer.summarize(old, self._existing_summary)
                 self._existing_summary = summary
+                # 通知压缩摘要事件（供 SessionManager 记录 compaction 事件）
+                if self._on_compaction is not None and old:
+                    covered_from_seq = old[0].get("seq", 0)
+                    covered_to_seq = old[-1].get("seq", 0)
+                    try:
+                        self._on_compaction(summary, covered_from_seq, covered_to_seq)
+                    except Exception:
+                        logger.exception(
+                            "压缩摘要事件回调执行失败",
+                            extra={"event": "compaction_callback_error"},
+                        )
                 summary_msg = {"role": "system", "content": f"[历史摘要] {summary}"}
                 self._messages = system_msgs + [summary_msg] + recent
                 logger.info(
@@ -254,3 +270,51 @@ class ContextManager:
         while body and body[0].get("role") == "system":
             system_msgs.append(body.pop(0))
         return system_msgs, body
+
+    def set_compaction_callback(self, callback) -> None:
+        """设置压缩摘要事件回调。
+
+        回调签名: callback(summary: str, covered_from_seq: int, covered_to_seq: int)。
+        在第三层 LLM 摘要压缩成功生成摘要后调用，用于通知外部记录压缩事件。
+        """
+        self._on_compaction = callback
+
+    def export_new_messages(self, after_seq: int) -> list[dict[str, Any]]:
+        """导出 seq 大于 after_seq 的新增消息列表（用于增量持久化）。
+
+        参数:
+            after_seq: 上次持久化时的最大 seq 值
+
+        返回:
+            seq 大于 after_seq 的消息列表（每个消息为副本）
+        """
+        return [dict(m) for m in self._messages if m.get("seq", 0) > after_seq]
+
+    def load_messages(self, messages: list[dict[str, Any]]) -> None:
+        """用传入的消息列表替换当前消息、重建 seq 并重置混合校准基准。
+
+        用于切换会话时装载还原出的工作上下文。注意：本方法不改变
+        _existing_summary，因为传入的 messages 本身可能已含摘要消息。
+
+        参数:
+            messages: 待装载的消息列表
+        """
+        self._messages = [dict(m) for m in messages]
+        # 重建 seq 计数器为当前消息中的最大 seq
+        max_seq = 0
+        for m in self._messages:
+            s = m.get("seq", 0)
+            if isinstance(s, int) and s > max_seq:
+                max_seq = s
+        self._seq_counter = max_seq
+        # 重置混合校准基准（下次 LLM 调用后重新校准）
+        self._calibrated_tokens = None
+        self._calibrated_count = 0
+
+    def reset(self) -> None:
+        """清空消息、seq 计数器、校准基准与历史摘要。"""
+        self._messages = []
+        self._seq_counter = 0
+        self._calibrated_tokens = None
+        self._calibrated_count = 0
+        self._existing_summary = None

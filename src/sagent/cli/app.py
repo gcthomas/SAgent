@@ -16,7 +16,10 @@ from ..core.prompts import REACT_SYSTEM_PROMPT
 from ..core.react_engine import ReActEngine
 from ..llm.client import LLMClient
 from ..observability import get_logger, new_trace_id, setup_logging
+from ..session.manager import SessionManager
+from ..session.store import SessionStore
 from ..tools import build_default_registry
+from .commands import ParsedCommand, parse_command
 
 # 退出命令
 _EXIT_COMMANDS = {"exit", "quit", ":q"}
@@ -68,6 +71,94 @@ def build_engine(
     return ReActEngine(llm, registry, agent_config, on_event=on_event, context_manager=context_manager)
 
 
+def _dispatch_session_command(parsed: ParsedCommand, session_manager) -> None:
+    """分发会话管理斜杠命令，负责 IO 编排，不返回值。
+
+    参数:
+        parsed: 解析后的斜杠命令
+        session_manager: 会话管理器，为 None 时提示会话管理未启用
+    """
+    if session_manager is None:
+        print("会话管理未启用")
+        return
+    name = parsed.name
+    if name == "new":
+        title = parsed.args[0] if parsed.args else ""
+        meta = session_manager.new_session(title)
+        print(f"已创建新会话: {meta.id} | {meta.title}")
+    elif name == "sessions":
+        sessions = session_manager.list_sessions()
+        cur = session_manager.get_current_session()
+        cur_id = cur.id if cur is not None else None
+        if not sessions:
+            print("暂无会话")
+        else:
+            for s in sessions:
+                mark = "*" if s.id == cur_id else " "
+                print(
+                    f"{mark} {s.id} | {s.title} | 更新: {s.updated_at} | 消息: {s.message_count}"
+                )
+    elif name == "switch":
+        if not parsed.args:
+            print("用法: /switch <会话id>")
+            return
+        result = session_manager.switch_session(parsed.args[0])
+        if result is None:
+            print("会话不存在")
+        else:
+            print(f"已切换到会话: {result.id} | {result.title}")
+    elif name == "rename":
+        if not parsed.args:
+            print("用法: /rename <新标题>")
+            return
+        ok = session_manager.rename_session(" ".join(parsed.args))
+        if ok:
+            print("已重命名当前会话")
+        else:
+            print("重命名失败:无当前会话")
+    elif name == "delete":
+        if not parsed.args:
+            print("用法: /delete <会话id>")
+            return
+        ok = session_manager.delete_session(parsed.args[0])
+        if ok:
+            print("已删除")
+        else:
+            print("不能删除当前会话或会话不存在")
+    elif name == "search":
+        if not parsed.args:
+            print("用法: /search <关键词>")
+            return
+        results = session_manager.search(" ".join(parsed.args))
+        if not results:
+            print("无匹配")
+        else:
+            for r in results:
+                print(f"[{r['session_id']}] {r['role']}: {r['snippet']}")
+    elif name == "session":
+        cur = session_manager.get_current_session()
+        if cur is None:
+            print("无当前会话")
+        else:
+            print(f"当前会话: {cur.id}")
+            print(f"标题: {cur.title}")
+            print(f"模式: {cur.mode}")
+            print(f"消息数: {cur.message_count}")
+            print(f"已持久化序号: {cur.persisted_seq}")
+    elif name == "help":
+        print("会话命令:")
+        print("  /new [标题]      创建新会话")
+        print("  /sessions        列出全部会话")
+        print("  /switch <id>     切换会话")
+        print("  /rename <标题>   重命名当前会话")
+        print("  /delete <id>     删除会话(不能删除当前会话)")
+        print("  /search <关键词> 搜索历史消息")
+        print("  /session         显示当前会话信息")
+        print("  /help            显示此帮助")
+    else:
+        print("未知命令，输入 /help 查看可用命令")
+
+
 def run() -> int:
     """CLI 主入口，返回进程退出码。"""
     parser = _build_parser()
@@ -95,6 +186,15 @@ def run() -> int:
     registry = build_default_registry()
     context_manager = ContextManager(config.context, llm, config.llm.model)
 
+    # 构建会话管理器（必须在 build_engine 之前，
+    # 因为 SessionManager 构造时会向 context_manager 注册压缩回调）
+    session_store = None
+    session_manager = None
+    if config.session.enabled:
+        session_store = SessionStore(config.session.db_path, config.session.enable_fts)
+        session_manager = SessionManager(session_store, context_manager, mode=mode)
+        session_manager.ensure_current_session()
+
     engine = build_engine(
         mode, llm, registry, config.agent, on_event=_print_event,
         context_manager=context_manager,
@@ -105,6 +205,11 @@ def run() -> int:
     print("SAgent 已启动")
     print(f"模型: {config.llm.model}  |  模式: {mode}")
     print(f"可用工具: {tool_names}")
+    if session_manager is not None:
+        cur = session_manager.get_current_session()
+        if cur is not None:
+            print(f"当前会话: {cur.id} | {cur.title}")
+        print("会话命令: /new /sessions /switch /rename /delete /search /session /help")
     print("输入你的问题开始对话；输入 exit / quit 退出。")
     print("=" * 60)
 
@@ -113,15 +218,31 @@ def run() -> int:
         try:
             user_input = input("\n你 > ").strip()
         except (EOFError, KeyboardInterrupt):
+            if session_manager is not None and config.session.auto_save:
+                try:
+                    session_manager.save_current()
+                except Exception:
+                    logger.exception("退出前会话保存失败", extra={"event": "session_save_error"})
             print("\n再见。")
             return 0
 
         if not user_input:
             continue
         if user_input.lower() in _EXIT_COMMANDS:
+            if session_manager is not None and config.session.auto_save:
+                try:
+                    session_manager.save_current()
+                except Exception:
+                    logger.exception("退出前会话保存失败", extra={"event": "session_save_error"})
             print("再见。")
             logger.info("用户退出", extra={"event": "exit"})
             return 0
+
+        # 检查是否为斜杠命令
+        parsed = parse_command(user_input)
+        if parsed is not None:
+            _dispatch_session_command(parsed, session_manager)
+            continue
 
         # 为本次问答生成 trace_id，串联整条链路
         new_trace_id()
@@ -135,6 +256,12 @@ def run() -> int:
         except Exception as exc:  # 捕获运行期异常，避免整个 CLI 崩溃
             print(f"执行出错: {exc}", file=sys.stderr)
             logger.exception("执行出错", extra={"event": "run_error"})
+            # 异常时也尝试保存已有消息
+            if session_manager is not None and config.session.auto_save:
+                try:
+                    session_manager.save_current()
+                except Exception:
+                    logger.exception("会话自动保存失败", extra={"event": "session_save_error"})
             continue
 
         logger.info(
@@ -142,6 +269,13 @@ def run() -> int:
             extra={"event": "final_answer", "answer_length": len(answer)},
         )
         print(f"\n助手 > {answer}")
+
+        # 每轮问答后增量保存会话消息
+        if session_manager is not None and config.session.auto_save:
+            try:
+                session_manager.save_current()
+            except Exception:
+                logger.exception("会话自动保存失败", extra={"event": "session_save_error"})
 
 
 def main() -> None:

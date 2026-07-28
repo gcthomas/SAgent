@@ -13,6 +13,7 @@
   - 预留 `ToolProvider` 接口，供未来接入 MCP / skill
 - 兼容任意 OpenAI 兼容的 LLM 服务（通过 base_url 指定）
 - 上下文管理：自动追踪 token 用量，超阈值时分层压缩（截断 → 卸载 → 摘要 → 裁剪），支持 API 精确 token 校准
+- 会话管理：创建/切换/重命名/删除会话，历史持久化到 SQLite（FTS5 全文检索），支持斜杠命令交互，为后续记忆能力奠基
 - 配置集中在 YAML 文件
 
 ## 环境要求
@@ -63,6 +64,11 @@ context:
   use_api_calibration: true      # 使用 API 返回的 prompt_tokens 做混合校准
   enable_summary: true           # 启用第三层 LLM 摘要压缩
   summary_max_tokens: 500        # 摘要最大 token 数（注入提示词约束 LLM 输出）
+session:                         # 会话管理（可选，缺省时使用默认值）
+  enabled: true                  # 是否启用会话管理
+  db_path: "sessions.db"         # 会话数据库文件路径（相对运行目录）
+  enable_fts: true               # 是否启用 FTS5 全文索引（不支持时降级为 LIKE 查询）
+  auto_save: true                # 是否每轮问答后自动增量保存会话消息
 ```
 
 环境变量覆盖（优先级高于配置文件）：
@@ -85,7 +91,15 @@ python main.py --mode react
 python main.py --config config.yaml --mode plan
 ```
 
-进入交互后输入问题即可对话，输入 `exit` 或 `quit` 退出。
+进入交互后输入问题即可对话，输入 `exit` 或 `quit` 退出。启用会话管理后还可用斜杠命令管理会话：
+
+```
+/new [名称]       创建新会话（名称可选，缺省自动生成）
+/switch <名称>    切换到指定会话
+/sessions         列出所有会话
+/rename <新名称>  重命名当前会话
+/delete <名称>    删除指定会话（删除当前会话会自动切换到其他会话）
+```
 
 ## 日志
 
@@ -123,6 +137,20 @@ Agent 运行过程中消息历史不断增长，超过模型上下文窗口会�
 
 触发压缩与停止的阈值由 `compression_threshold` 与 `safe_threshold` 控制（相对 `max_context_tokens` 的占比）。`context` 段为可选配置，缺省时使用默认值。
 
+## 会话管理
+
+启用会话管理（`session.enabled: true`）后，每轮问答的历史会持久化到 SQLite 数据库，支持创建、切换、重命名、删除会话，并通过斜杠命令在交互中管理。
+
+**双层存储模型**（参考 LangGraph、OpenAI Assistants、MemGPT 等业界实践）：
+
+- **append-only 完整历史**：`messages` 表按单调递增 `seq` 追加写入，从不修改已落盘消息，保留无损完整历史
+- **压缩事件日志**：`session_events` 表记录上下文压缩事件（摘要文本 + 覆盖的 seq 区间），不改动原始历史
+- **工作上下文还原**：切换会话时由「最近一次压缩摘要 + 其后原始消息」拼接得到，与运行时上下文管理器桥接
+
+**增量保存**：仅追加 `seq > persisted_seq` 的新消息，避免全量重写开销。上下文压缩发生时，压缩事件单独写入 `session_events`，原消息历史不被删改，后续可基于完整历史做记忆检索。
+
+**FTS5 全文检索**：消息正文建立 FTS5 索引，便于后续按关键词检索历史对话；运行环境不支持 FTS5 时自动降级为 LIKE 查询。
+
 ## 目录结构
 
 ```
@@ -135,11 +163,12 @@ src/sagent/
   tools/                    工具基类、注册表、内置工具
   core/                     ReAct 与 Plan 执行引擎、提示词
   context/                  上下文管理：token 估算、分层压缩、上下文管理器
+  session/                  会话管理：数据模型、SQLite 持久化、会话管理器
   observability/            日志系统（JSON 结构化、按天滚动、trace_id）
-  cli/                      命令行应用
+  cli/                      命令行应用、斜杠命令解析
 tests/
   conftest.py               公共 fixture 与 FakeLLMClient
-  unit/                     单元测试（配置、工具、注册表、Plan 解析、上下文管理，无需 LLM）
+  unit/                     单元测试（配置、工具、注册表、Plan 解析、上下文管理、会话存储与管理、命令解析，无需 LLM）
   engines/                  引擎测试（ReAct / Plan，用 FakeLLMClient 离线回放）
   evals/                    Agent 能力评测（离线回放 + 可选真实 LLM）
 ```
@@ -174,4 +203,5 @@ python -m pytest tests/evals
 
 - 新增工具：继承 `sagent.tools.base.Tool`，定义 `name`、`description`、`args_schema` 与 `run`，再注册到 `ToolRegistry`。
 - 新增压缩策略：继承 `sagent.context.strategies.CompressionStrategy`，实现 `compress(messages) -> list`，在 `ContextManager` 中集成。
+- 新增斜杠命令：`cli/commands.py` 中的 `parse_command` 为通用纯函数解析器，新增任意 slash command 均复用该解析器，仅需在 `cli/app.py` 的分发逻辑中增加对应分支。
 - MCP / skill：实现 `sagent.tools.base.ToolProvider` 接口，通过 `ToolRegistry.register_provider` 接入（当前仅预留接口）。

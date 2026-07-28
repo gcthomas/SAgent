@@ -60,3 +60,15 @@ context:
   enable_summary: true
   # 第三层 LLM 摘要压缩生成的摘要最大 token 数（注入摘要提示词约束 LLM 输出长度）
   summary_max_tokens: 500
+
+# 会话管理配置（可选，缺省时使用默认值）
+# 启用后会话历史将持久化到 SQLite 数据库，支持创建/切换/搜索会话
+session:
+  # 是否启用会话管理
+  enabled: true
+  # 会话数据库文件路径（相对运行目录）
+  db_path: "sessions.db"
+  # 是否启用 FTS5 全文索引（用于历史消息检索，不支持时自动降级为 LIKE 查询）
+  enable_fts: true
+  # 是否每轮问答后自动增量保存会话消息
+  auto_save: true

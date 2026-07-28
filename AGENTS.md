@@ -8,11 +8,12 @@
 
 - **项目类型**：CLI 工具 / Python 应用
 - **核心功能**：命令行交互式 Agent，支持工具调用与多轮编排
-- **技术栈**：Python 3.10+、openai SDK、pydantic v2、pyyaml、pytest
+- **技术栈**：Python 3.10+、openai SDK、pydantic v2、pyyaml、pytest、sqlite3（标准库）
 - **架构说明**：
   - 两种执行模式：ReAct（推理-行动-观察循环）、Plan（拆解-逐步执行-汇总）
   - 工具系统基于 pydantic 定义参数 schema，对接 LLM function calling
   - 上下文管理：自动追踪 token 用量，超阈值时分层压缩（截断→卸载→摘要→裁剪），支持 API 精确 token 校准
+  - 会话管理：会话历史持久化到 SQLite（FTS5 全文检索），双层存储模型（append-only 完整历史 + 压缩事件日志），增量保存，斜杠命令交互
   - 兼容任意 OpenAI 兼容的 LLM 服务（通过 base_url 指定）
   - 配置集中在 YAML 文件，敏感项支持环境变量覆盖
   - 内置 JSON 结构化日志，按天滚动，带 trace_id 全链路关联
@@ -78,9 +79,10 @@ requirements.txt            运行时依赖
 requirements-dev.txt        开发与测试依赖
 pytest.ini                  pytest 配置（pythonpath=src，testpaths=tests）
 src/sagent/
-  cli/app.py                CLI 应用：参数解析、交互循环、引擎构建
+  cli/app.py                CLI 应用：参数解析、交互循环、引擎构建、斜杠命令分发、会话集成
+  cli/commands.py           斜杠命令纯函数解析器 parse_command（与命令族无关，非斜杠输入返回 None）
   config/
-    models.py               配置模型（pydantic）：LLMConfig、AgentConfig、LoggingConfig、ContextConfig、AppConfig
+    models.py               配置模型（pydantic）：LLMConfig、AgentConfig、LoggingConfig、ContextConfig、SessionConfig、AppConfig
     loader.py               YAML 配置加载 + 环境变量覆盖 + 校验
   llm/client.py             LLM 客户端：封装 openai SDK，统一 LLMResponse 结构（含 usage 字段）
   core/
@@ -90,8 +92,12 @@ src/sagent/
   context/
     token_counter.py        Token 估算器：tiktoken 精确 / 字符启发式 / auto 自动回退
     strategies.py           分层压缩策略：截断、卸载、摘要、裁剪
-    context_manager.py      上下文管理器：消息维护、token 追踪、触发压缩、混合校准
+    context_manager.py      上下文管理器：消息维护、token 追踪、触发压缩、混合校准、seq 维护与增量导出
     prompts.py              摘要压缩系统提示词
+  session/
+    models.py               会话数据模型：SessionMeta、SessionMessage、CompactionEvent
+    store.py                会话持久化存储：SQLite + FTS5，双层表结构（append-only 消息 + 压缩事件）
+    manager.py              会话管理器：创建/切换/删除/增量保存/工作上下文还原，桥接 ContextManager
   tools/
     base.py                 Tool 抽象基类 + ToolProvider 接口（预留 MCP/skill）
     registry.py             ToolRegistry：注册、schema 输出、按名称执行
@@ -102,7 +108,7 @@ src/sagent/
     logging_setup.py        JSON 结构化日志、按天滚动、trace_id 上下文关联
 tests/
   conftest.py               公共 fixture：FakeLLMClient、make_tool_call、text_response（支持 usage）
-  unit/                     单元测试（配置、工具、注册表、Plan 解析、上下文管理，无需 LLM）
+  unit/                     单元测试（配置、工具、注册表、Plan 解析、上下文管理、会话存储与管理、斜杠命令解析，无需 LLM）
   engines/                  引擎测试（ReAct / Plan，用 FakeLLMClient 离线回放）
   evals/                    Agent 能力评测（离线回放 + 可选真实 LLM）
 ```
@@ -113,9 +119,14 @@ tests/
 - **`src/sagent/core/plan_engine.py`**：Plan 执行引擎。先调用 LLM 拆解任务为 JSON 步骤列表，每步复用 ReAct 引擎执行，最后汇总。
 - **`src/sagent/tools/registry.py`**：工具注册表。**关键**：`execute()` 对未知工具、参数错误、执行异常均做容错处理，返回以"错误:"开头的字符串而不抛异常（避免 Agent 流程中断）。
 - **`src/sagent/llm/client.py`**：LLM 客户端。封装 openai SDK，统一返回 `LLMResponse`（含 content、tool_calls、usage）。记录请求/响应日志，默认仅摘要。`usage` 字段暴露 API 返回的 `prompt_tokens` / `completion_tokens` / `total_tokens`，供上下文管理器做混合校准。
-- **`src/sagent/context/context_manager.py`**：上下文管理器。维护消息历史，自动追踪 token 用量，超阈值时触发分层压缩。关键方法：`add_message()` 添加消息（对 tool 结果立即内联截断）、`get_messages()` 获取消息（超阈值自动压缩）、`record_llm_usage()` 记录 API 返回的精确 token 数用于混合校准、`token_count` 属性返回当前估算 token 数（混合校准模式 = 精确基准 + delta）。压缩触发时重置校准基准。
+- **`src/sagent/context/context_manager.py`**：上下文管理器。维护消息历史，自动追踪 token 用量，超阈值时触发分层压缩。关键方法：`add_message()` 添加消息（对 tool 结果立即内联截断）、`get_messages()` 获取消息（超阈值自动压缩）、`record_llm_usage()` 记录 API 返回的精确 token 数用于混合校准、`token_count` 属性返回当前估算 token 数（混合校准模式 = 精确基准 + delta）。压缩触发时重置校准基准。会话集成扩展：维护单调递增 `seq` 序号、`export_new_messages(after_seq)` 增量导出新消息、`load_messages()` 替换消息并重建 seq/重置校准、`set_compaction_callback()` 注册压缩回调（摘要文本 + 覆盖 seq 区间）供会话管理器记录压缩事件。
 - **`src/sagent/context/strategies.py`**：分层压缩策略。四层依次为：ToolOutputTruncation（截断过长工具输出）、ToolMessageOffload（卸载过期工具消息对）、LLMSummaryCompression（LLM 生成摘要替换旧消息）、SlidingWindowPruning（兜底裁剪，裁剪边界自动对齐 tool_call/tool_result pair 防止孤儿消息）。所有策略实现 `CompressionStrategy` 接口，返回新列表不修改原列表。
 - **`src/sagent/context/token_counter.py`**：Token 估算器。`count_tokens()` 对 OpenAI 消息列表估算总 token（含 tool_calls 开销与格式开销）；`count_text_tokens()` 对单段文本估算。支持 auto/tiktoken/heuristic 三种方式。
+- **`src/sagent/session/models.py`**：会话数据模型（pydantic）。`SessionMeta`（含 `persisted_seq` 已持久化游标）、`SessionMessage`（OpenAI 消息结构 + 单调递增 `seq`）、`CompactionEvent`（压缩事件：摘要文本 + 覆盖 seq 区间）。
+- **`src/sagent/session/store.py`**：会话持久化存储。基于 SQLite，双层表结构：`sessions` 表（元数据）、`messages` 表（append-only 完整历史，按 `seq` 递增）、`session_events` 表（压缩事件日志）。`append_messages()` 仅插入 `seq > persisted_seq` 的新消息实现增量写入；`build_working_context()` 由最近压缩摘要 + 其后原始消息拼接还原工作上下文；`append_compaction_event()` 记录压缩事件不改动原始历史。FTS5 全文索引不可用时自动降级为 LIKE 查询。
+- **`src/sagent/session/manager.py`**：会话管理器。协调 SessionStore 与 ContextManager，负责会话创建/切换/重命名/删除、增量保存与工作上下文还原。`save_current()` 调用 `export_new_messages` 导出新增消息并委托 Store 增量写入；`switch_session()` 通过 `build_working_context` 还原上下文并 `load_messages` 装入 ContextManager；通过 `set_compaction_callback` 注册回调，压缩发生时将压缩事件写入 `session_events` 而不删改已落盘历史。删除当前会话时自动切换到其他会话以保护状态。
+- **`src/sagent/cli/commands.py`**：斜杠命令纯函数解析器。`parse_command(raw) -> ParsedCommand | None` 将 `/name arg...` 解析为命令名+参数结构，非斜杠输入返回 `None`。与命令族无关，未来新增任意 slash command 均复用此解析器。
+- **`src/sagent/cli/app.py`**：CLI 应用。构建 SessionStore/SessionManager（`session.enabled` 时）、交互循环中调用 `parse_command` 分发斜杠命令到 SessionManager、`auto_save` 时每轮问答后增量保存、退出时保存当前会话。
 - **`src/sagent/observability/logging_setup.py`**：日志系统。文件日志为 JSON 每行一条，按天滚动；控制台为纯文本。每次问答生成 trace_id 注入全部日志。
 
 ## 代码规范
@@ -137,8 +148,9 @@ tests/
 ### 配置与数据建模
 
 - 配置结构使用 pydantic `BaseModel`，字段带 `Field(..., description=...)`
-- 配置模型包括：`LLMConfig`、`AgentConfig`、`LoggingConfig`、`ContextConfig`（上下文管理）、`AppConfig`（顶层聚合）
+- 配置模型包括：`LLMConfig`、`AgentConfig`、`LoggingConfig`、`ContextConfig`（上下文管理）、`SessionConfig`（会话管理）、`AppConfig`（顶层聚合）
 - `ContextConfig` 控制 token 预算（`max_context_tokens`）、压缩阈值（`compression_threshold` / `safe_threshold`）、压缩策略参数（`keep_recent_messages`、`max_tool_output_tokens`、`enable_summary`、`summary_max_tokens`）、token 计数方式（`token_counter_method`）、混合校准开关（`use_api_calibration`）
+- `SessionConfig` 控制会话管理（`enabled` 开关、`db_path` SQLite 路径、`enable_fts` FTS5 全文索引、`auto_save` 每轮自动增量保存）；`AppConfig.session` 缺省可用
 - 工具参数使用 pydantic 模型定义 `args_schema`，自动生成 JSON schema 供 function calling
 
 ### 日志
@@ -169,7 +181,7 @@ tests/
 
 ### 测试分层
 
-1. **单元测试**（`tests/unit/`）：不依赖 LLM，覆盖配置加载、工具执行与容错、注册表、Plan 步骤解析、上下文管理（压缩策略、token 计数、混合校准）
+1. **单元测试**（`tests/unit/`）：不依赖 LLM，覆盖配置加载、工具执行与容错、注册表、Plan 步骤解析、上下文管理（压缩策略、token 计数、混合校准、seq 维护与增量导出）、会话存储（建表/CRUD/增量追加/压缩事件/工作上下文还原/FTS5 降级）、会话管理（创建/切换/增量保存/删除保护）、斜杠命令解析（`parse_command` 纯函数用例）
 2. **引擎测试**（`tests/engines/`）：使用 `FakeLLMClient` 按预设响应队列离线回放，验证 ReAct / Plan 多轮编排逻辑，快速且可复现
 3. **能力评测**（`tests/evals/`）：以数据形式集中定义评测场景。默认走离线回放；设置 `RUN_LLM_EVALS=1` 调用真实模型并用 LLM-as-judge 打分
 
@@ -208,6 +220,7 @@ tests/
 
 - **新增工具**：详见"代码规范 > 工具开发约定"章节
 - **新增压缩策略**：继承 `sagent.context.strategies.CompressionStrategy`，实现 `compress(messages) -> list`，在 `ContextManager.__init__` 中实例化并在 `_compress()` 中按需调用
+- **新增斜杠命令**：`cli/commands.py` 中的 `parse_command` 为通用纯函数解析器，新增任意 slash command 均复用该解析器，仅需在 `cli/app.py` 的分发逻辑中增加对应分支；解析用例统一并入 `tests/unit/test_cli.py`
 - **MCP / skill 接入**：实现 `sagent.tools.base.ToolProvider` 接口，通过 `ToolRegistry.register_provider()` 接入（当前仅预留接口）
 - **新增执行模式**：参考 `ReActEngine` / `PlanEngine` 实现引擎类，在 `cli/app.py` 的 `build_engine()` 中添加分支
 

@@ -89,6 +89,22 @@ class ContextConfig(BaseModel):
     summary_max_tokens: int = Field(default=500, description="生成的摘要最大 token 数，注入提示词约束 LLM 输出长度")
 
 
+class SessionConfig(BaseModel):
+    """会话管理配置。
+
+    控制会话历史的持久化行为，包括数据库路径、全文索引与自动保存。
+    """
+
+    # 是否启用会话管理
+    enabled: bool = Field(default=True, description="是否启用会话管理")
+    # 会话数据库文件路径（相对运行目录）
+    db_path: str = Field(default="sessions.db", description="会话数据库文件路径")
+    # 是否启用 FTS5 全文索引（用于历史消息检索，不支持时自动降级为 LIKE 查询）
+    enable_fts: bool = Field(default=True, description="是否启用 FTS5 全文索引")
+    # 是否每轮问答后自动增量保存会话消息
+    auto_save: bool = Field(default=True, description="是否每轮自动增量保存")
+
+
 class AppConfig(BaseModel):
     """应用总配置。"""
 
@@ -96,3 +112,4 @@ class AppConfig(BaseModel):
     agent: AgentConfig = Field(default_factory=AgentConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     context: ContextConfig = Field(default_factory=ContextConfig, description="上下文管理配置")
+    session: SessionConfig = Field(default_factory=SessionConfig, description="会话管理配置")

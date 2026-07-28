@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+from conftest import text_response
 from sagent.config.models import ContextConfig
 from sagent.context.context_manager import ContextManager
 
@@ -192,3 +193,237 @@ def test_calibration_reset_after_compression():
     # 触发压缩，校准应被重置
     cm.get_messages()
     assert cm._calibrated_tokens is None
+
+
+# ========== seq 维护 ==========
+
+
+def test_seq_incremental():
+    """连续添加三条消息，seq 应单调递增为 1、2、3。"""
+    config = ContextConfig(max_context_tokens=128000, token_counter_method="heuristic")
+    cm = ContextManager(config)
+    cm.add_message({"role": "system", "content": "你是助手"})
+    cm.add_message({"role": "user", "content": "第一条"})
+    cm.add_message({"role": "user", "content": "第二条"})
+    assert cm._messages[0]["seq"] == 1
+    assert cm._messages[1]["seq"] == 2
+    assert cm._messages[2]["seq"] == 3
+
+
+def test_seq_preserved_in_get_messages():
+    """add 后 get_messages 返回的消息应包含 seq 字段且值正确。"""
+    config = ContextConfig(max_context_tokens=128000, token_counter_method="heuristic")
+    cm = ContextManager(config)
+    cm.add_message({"role": "user", "content": "你好"})
+    cm.add_message({"role": "user", "content": "世界"})
+    msgs = cm.get_messages()
+    assert len(msgs) == 2
+    assert msgs[0]["seq"] == 1
+    assert msgs[1]["seq"] == 2
+
+
+# ========== export_new_messages 增量导出 ==========
+
+
+def test_export_new_messages_returns_all_after_zero():
+    """add 三条后，export_new_messages(0) 应返回全部 3 条。"""
+    config = ContextConfig(max_context_tokens=128000, token_counter_method="heuristic")
+    cm = ContextManager(config)
+    cm.add_message({"role": "user", "content": "一"})
+    cm.add_message({"role": "user", "content": "二"})
+    cm.add_message({"role": "user", "content": "三"})
+    exported = cm.export_new_messages(0)
+    assert len(exported) == 3
+    assert [m["seq"] for m in exported] == [1, 2, 3]
+
+
+def test_export_new_messages_returns_only_after_seq():
+    """add 三条后，export_new_messages(2) 仅返回 seq=3 的一条。"""
+    config = ContextConfig(max_context_tokens=128000, token_counter_method="heuristic")
+    cm = ContextManager(config)
+    cm.add_message({"role": "user", "content": "一"})
+    cm.add_message({"role": "user", "content": "二"})
+    cm.add_message({"role": "user", "content": "三"})
+    exported = cm.export_new_messages(2)
+    assert len(exported) == 1
+    assert exported[0]["seq"] == 3
+
+
+def test_export_new_messages_returns_empty_when_none():
+    """无新增消息时，export_new_messages(5) 应返回空列表。"""
+    config = ContextConfig(max_context_tokens=128000, token_counter_method="heuristic")
+    cm = ContextManager(config)
+    cm.add_message({"role": "user", "content": "一"})
+    cm.add_message({"role": "user", "content": "二"})
+    exported = cm.export_new_messages(5)
+    assert exported == []
+
+
+def test_export_new_messages_returns_copies():
+    """导出的消息应为副本，修改不影响原列表。"""
+    config = ContextConfig(max_context_tokens=128000, token_counter_method="heuristic")
+    cm = ContextManager(config)
+    cm.add_message({"role": "user", "content": "原始内容"})
+    exported = cm.export_new_messages(0)
+    assert len(exported) == 1
+    exported[0]["content"] = "被修改的内容"
+    exported[0]["seq"] = 999
+    # 原列表不受影响
+    original = cm.get_messages()
+    assert original[0]["content"] == "原始内容"
+    assert original[0]["seq"] == 1
+
+
+# ========== load_messages 替换消息并重建 seq ==========
+
+
+def test_load_messages_replaces_messages():
+    """load 后 get_messages 返回新列表，原消息被替换。"""
+    config = ContextConfig(max_context_tokens=128000, token_counter_method="heuristic")
+    cm = ContextManager(config)
+    cm.add_message({"role": "user", "content": "旧消息"})
+    cm.load_messages(
+        [
+            {"role": "system", "content": "新系统提示"},
+            {"role": "user", "content": "新用户消息"},
+        ]
+    )
+    msgs = cm.get_messages()
+    assert len(msgs) == 2
+    assert msgs[0]["content"] == "新系统提示"
+    assert msgs[1]["content"] == "新用户消息"
+
+
+def test_load_messages_rebuilds_seq_counter():
+    """load 含 seq=5 的消息后，再 add_message 时新消息 seq 应为 6。"""
+    config = ContextConfig(max_context_tokens=128000, token_counter_method="heuristic")
+    cm = ContextManager(config)
+    cm.load_messages([{"role": "user", "content": "已存在", "seq": 5}])
+    assert cm._seq_counter == 5
+    cm.add_message({"role": "user", "content": "新增"})
+    assert cm._messages[-1]["seq"] == 6
+
+
+def test_load_messages_resets_calibration():
+    """load 后混合校准基准被重置：_calibrated_tokens 为 None、_calibrated_count 为 0。"""
+    config = ContextConfig(max_context_tokens=128000, token_counter_method="heuristic")
+    cm = ContextManager(config)
+    cm.add_message({"role": "user", "content": "你好"})
+    cm.record_llm_usage({"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120})
+    assert cm._calibrated_tokens == 100
+    cm.load_messages([{"role": "user", "content": "装载"}])
+    assert cm._calibrated_tokens is None
+    assert cm._calibrated_count == 0
+
+
+def test_load_messages_empty_list_resets_seq():
+    """load 空列表后 _seq_counter 应为 0。"""
+    config = ContextConfig(max_context_tokens=128000, token_counter_method="heuristic")
+    cm = ContextManager(config)
+    cm.add_message({"role": "user", "content": "一"})
+    cm.add_message({"role": "user", "content": "二"})
+    assert cm._seq_counter == 2
+    cm.load_messages([])
+    assert cm._seq_counter == 0
+    assert cm.get_messages() == []
+
+
+# ========== reset 清空 ==========
+
+
+def test_reset_clears_messages():
+    """reset 后 get_messages 返回空列表。"""
+    config = ContextConfig(max_context_tokens=128000, token_counter_method="heuristic")
+    cm = ContextManager(config)
+    cm.add_message({"role": "user", "content": "一"})
+    cm.add_message({"role": "user", "content": "二"})
+    cm.reset()
+    assert cm.get_messages() == []
+
+
+def test_reset_clears_seq_counter():
+    """reset 后 _seq_counter 应为 0。"""
+    config = ContextConfig(max_context_tokens=128000, token_counter_method="heuristic")
+    cm = ContextManager(config)
+    cm.add_message({"role": "user", "content": "一"})
+    cm.add_message({"role": "user", "content": "二"})
+    cm.reset()
+    assert cm._seq_counter == 0
+
+
+def test_reset_clears_calibration():
+    """reset 后 _calibrated_tokens 应为 None。"""
+    config = ContextConfig(max_context_tokens=128000, token_counter_method="heuristic")
+    cm = ContextManager(config)
+    cm.add_message({"role": "user", "content": "一"})
+    cm.record_llm_usage({"prompt_tokens": 50, "completion_tokens": 5, "total_tokens": 55})
+    assert cm._calibrated_tokens == 50
+    cm.reset()
+    assert cm._calibrated_tokens is None
+    assert cm._calibrated_count == 0
+
+
+def test_reset_clears_existing_summary(make_fake_llm):
+    """reset 后 _existing_summary 应为 None。"""
+    config = ContextConfig(
+        max_context_tokens=100,
+        compression_threshold=0.5,
+        safe_threshold=0.3,
+        keep_recent_messages=2,
+        enable_summary=True,
+        summary_max_tokens=100,
+        token_counter_method="heuristic",
+    )
+    llm = make_fake_llm([text_response("这是摘要内容")])
+    cm = ContextManager(config, llm=llm, model="")
+    cm.add_message({"role": "system", "content": "你是助手"})
+    for i in range(10):
+        cm.add_message(
+            {"role": "user", "content": f"这是第{i}条较长的测试消息内容用于触发压缩"}
+        )
+    cm.get_messages()  # 触发摘要压缩，_existing_summary 被设置
+    assert cm._existing_summary is not None
+    cm.reset()
+    assert cm._existing_summary is None
+
+
+# ========== 第三层摘要压缩暴露「摘要文本 + 覆盖 seq 区间」 ==========
+
+
+def test_compaction_callback_invoked_with_summary_and_seq_range(make_fake_llm):
+    """第三层 LLM 摘要压缩触发时，回调被调用且参数含摘要文本与覆盖 seq 区间。
+
+    构造小 max_context_tokens、enable_summary=True，添加足够多消息触发压缩，
+    验证回调签名 callback(summary, covered_from_seq, covered_to_seq) 被正确调用，
+    且 covered_from_seq/covered_to_seq 为正整数、from_seq <= to_seq。
+    """
+    config = ContextConfig(
+        max_context_tokens=200,
+        compression_threshold=0.5,
+        safe_threshold=0.3,
+        keep_recent_messages=2,
+        enable_summary=True,
+        summary_max_tokens=100,
+        token_counter_method="heuristic",
+    )
+    llm = make_fake_llm([text_response("这是摘要内容")])
+    cm = ContextManager(config, llm=llm, model="")
+
+    captured = []
+    cm.set_compaction_callback(lambda summary, frm, to: captured.append((summary, frm, to)))
+
+    cm.add_message({"role": "system", "content": "你是助手"})
+    for i in range(10):
+        cm.add_message(
+            {"role": "user", "content": f"这是第{i}条较长的测试消息内容用于触发压缩"}
+        )
+
+    cm.get_messages()  # 触发压缩
+
+    assert len(captured) == 1
+    summary, frm, to = captured[0]
+    assert isinstance(summary, str) and len(summary) > 0
+    assert "摘要" in summary
+    assert isinstance(frm, int) and frm >= 1
+    assert isinstance(to, int) and to >= 1
+    assert frm <= to
