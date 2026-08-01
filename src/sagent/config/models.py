@@ -105,6 +105,22 @@ class SessionConfig(BaseModel):
     auto_save: bool = Field(default=True, description="是否每轮自动增量保存")
 
 
+class MemoryConfig(BaseModel):
+    """长期记忆配置。
+
+    控制基于本地 Markdown 文件的长期记忆功能，包括开关、目录路径与字符上限。
+    """
+
+    # 是否启用长期记忆
+    enabled: bool = Field(default=True, description="是否启用长期记忆")
+    # 记忆文件所在目录（相对运行目录），两个 Markdown 文件均存于此目录
+    dir: str = Field(default="memory", description="记忆文件所在目录（相对运行目录）")
+    # 用户文件字符上限，超限触发反思整理
+    user_max_chars: int = Field(default=2000, description="用户文件字符上限")
+    # 记忆文件字符上限，超限触发反思整理
+    memory_max_chars: int = Field(default=4000, description="记忆文件字符上限")
+
+
 class AppConfig(BaseModel):
     """应用总配置。"""
 
@@ -113,3 +129,4 @@ class AppConfig(BaseModel):
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     context: ContextConfig = Field(default_factory=ContextConfig, description="上下文管理配置")
     session: SessionConfig = Field(default_factory=SessionConfig, description="会话管理配置")
+    memory: MemoryConfig = Field(default_factory=MemoryConfig, description="长期记忆配置")

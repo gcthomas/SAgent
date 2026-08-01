@@ -1,0 +1,27 @@
+# Checklist
+
+- [x] `MemoryConfig` 含 enabled/user_file/memory_file/user_max_chars/memory_max_chars 字段，挂载到 `AppConfig.memory` 且缺省可用（默认 enabled=True、user_max_chars=2000、memory_max_chars=4000）
+- [x] `config.example.yaml` 含 `memory` 段示例且与默认值一致
+- [x] `MemoryStore` 支持文件不存在时初始化空字符串，不报错
+- [x] `MemoryStore` 落盘采用临时文件 + rename 原子写入
+- [x] `MemoryStore` 支持读取全文、追加内容、替换文本（查找 old 替换 new）、删除文本（查找并移除）、字符上限检查（返回是否超限）
+- [x] `MemoryManager.build_system_prompt` 将 USER.md 与 MEMORY.md 内容拼装为系统提示词前缀，格式清晰可读
+- [x] 注入前缀包含记忆使用引导提示词（`MEMORY_GUIDE_PROMPT`），引导 LLM 何时调用记忆工具、什么该保存/跳过及写入原则；即使记忆为空也注入引导提示词
+- [x] `MemoryManager.build_system_prompt` 在会话开始时调用一次，结果冻结复用（不在每轮重建）
+- [x] `MemoryManager.add` 追加内容、`replace` 查找替换、`remove` 查找删除，均在超限时触发反思整理
+- [x] `replace` / `remove` 未找到目标文本时返回提示（不报错、不阻断）
+- [x] 反思整理调用 LLM（去重/合并冗余/精简表述/不超过上限），结果原子写回文件
+- [x] 反思整理 LLM 调用失败/输出非法时记录日志并保留写入前内容，不抛异常、不阻断主流程
+- [x] `AddMemoryTool` / `ReplaceMemoryTool` / `RemoveMemoryTool` 继承 `Tool` 基类，参数集分别为（target+content）/（target+old+new）/（target+content）
+- [x] 三个工具描述引导 LLM 判断目标文件（用户偏好/环境→user，项目/经验→memory）与选择合适操作（新增/更新/删除）
+- [x] 三个工具 schema（name/description/parameters）符合 ReAct 工具表要求
+- [x] `cli/app.py` 在 `config.memory.enabled` 时构建 `MemoryManager` 与三个记忆工具并接入
+- [x] 会话开始前注入冻结的系统提示词，整个会话复用（prefix cache 友好）
+- [x] 三个记忆工具注册入工具表，LLM 可在 ReAct 推理中自主调用
+- [x] 会话期间磁盘文件更新不影响已注入前缀（更新于下次会话生效）
+- [x] 不提供 `/memory` 系列斜杠命令（用户直接查看/编辑 Markdown 文件）
+- [x] 启动横幅打印记忆状态与文件路径
+- [x] 不修改 `context/`、`session/`、`core/` 引擎、`tools/registry.py`、`tools/base.py` 现有逻辑（仅新增与必要集成点）
+- [x] 新增模块顶部含中文 docstring，`from __future__ import annotations`，使用现代类型语法，logger 用 `get_logger(__name__)`
+- [x] 单元测试覆盖存储读写/替换/删除/容量、管理器注入/反思整理/容错、三工具 schema 与执行
+- [x] `python -m pytest` 全部用例通过

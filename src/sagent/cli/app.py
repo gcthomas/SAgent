@@ -8,17 +8,18 @@ from __future__ import annotations
 
 import argparse
 import sys
+from pathlib import Path
 
 from ..config.loader import ConfigError, load_config
 from ..context.context_manager import ContextManager
 from ..core.plan_engine import PlanEngine
-from ..core.prompts import REACT_SYSTEM_PROMPT
 from ..core.react_engine import ReActEngine
 from ..llm.client import LLMClient
+from ..memory import MemoryManager, MemoryStore
 from ..observability import get_logger, new_trace_id, setup_logging
 from ..session.manager import SessionManager
 from ..session.store import SessionStore
-from ..tools import build_default_registry
+from ..tools import AddMemoryTool, RemoveMemoryTool, ReplaceMemoryTool, build_default_registry
 from .commands import ParsedCommand, parse_command
 
 # 退出命令
@@ -186,6 +187,19 @@ def run() -> int:
     registry = build_default_registry()
     context_manager = ContextManager(config.context, llm, config.llm.model)
 
+    # 构建长期记忆管理器（仅当 memory 启用时）；并向工具表追加三个记忆工具
+    memory_manager = None
+    if config.memory.enabled:
+        memory_store = MemoryStore(
+            directory=Path.cwd() / config.memory.dir,
+            user_max_chars=config.memory.user_max_chars,
+            memory_max_chars=config.memory.memory_max_chars,
+        )
+        memory_manager = MemoryManager(memory_store, llm)
+        registry.register(AddMemoryTool(memory_manager))
+        registry.register(ReplaceMemoryTool(memory_manager))
+        registry.register(RemoveMemoryTool(memory_manager))
+
     # 构建会话管理器（必须在 build_engine 之前，
     # 因为 SessionManager 构造时会向 context_manager 注册压缩回调）
     session_store = None
@@ -200,6 +214,13 @@ def run() -> int:
         context_manager=context_manager,
     )
 
+    # 会话开始前构建冻结的记忆前缀：memory 启用时读取记忆文件构造前缀，
+    # 整个会话复用同一份前缀以命中 prefix cache；未启用时为 None，保持默认行为。
+    # 引擎在 run 时将该前缀与自身默认系统提示词叠加，而非替换。
+    memory_prefix: str | None = None
+    if memory_manager is not None:
+        memory_prefix = memory_manager.build_memory_prefix()
+
     tool_names = ", ".join(t.name for t in registry.list_tools())
     print("=" * 60)
     print("SAgent 已启动")
@@ -210,6 +231,10 @@ def run() -> int:
         if cur is not None:
             print(f"当前会话: {cur.id} | {cur.title}")
         print("会话命令: /new /sessions /switch /rename /delete /search /session /help")
+    if memory_manager is not None:
+        print(f"记忆: 已启用 | {config.memory.dir}/ @ {Path.cwd()}")
+    else:
+        print("记忆: 未启用")
     print("输入你的问题开始对话；输入 exit / quit 退出。")
     print("=" * 60)
 
@@ -252,7 +277,7 @@ def run() -> int:
         )
 
         try:
-            answer = engine.run(user_input)
+            answer = engine.run(user_input, memory_prefix=memory_prefix)
         except Exception as exc:  # 捕获运行期异常，避免整个 CLI 崩溃
             print(f"执行出错: {exc}", file=sys.stderr)
             logger.exception("执行出错", extra={"event": "run_error"})

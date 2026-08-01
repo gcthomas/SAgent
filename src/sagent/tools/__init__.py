@@ -2,6 +2,7 @@
 
 from .base import Tool, ToolProvider
 from .file_tools import ReadFileTool, WriteFileTool
+from .memory_tool import AddMemoryTool, RemoveMemoryTool, ReplaceMemoryTool
 from .registry import ToolRegistry
 from .shell_tool import ShellTool
 
@@ -22,5 +23,8 @@ __all__ = [
     "ReadFileTool",
     "WriteFileTool",
     "ShellTool",
+    "AddMemoryTool",
+    "ReplaceMemoryTool",
+    "RemoveMemoryTool",
     "build_default_registry",
 ]

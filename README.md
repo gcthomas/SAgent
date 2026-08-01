@@ -13,7 +13,8 @@
   - 预留 `ToolProvider` 接口，供未来接入 MCP / skill
 - 兼容任意 OpenAI 兼容的 LLM 服务（通过 base_url 指定）
 - 上下文管理：自动追踪 token 用量，超阈值时分层压缩（截断 → 卸载 → 摘要 → 裁剪），支持 API 精确 token 校准
-- 会话管理：创建/切换/重命名/删除会话，历史持久化到 SQLite（FTS5 全文检索），支持斜杠命令交互，为后续记忆能力奠基
+- 会话管理：创建/切换/重命名/删除会话，历史持久化到 SQLite（FTS5 全文检索），支持斜杠命令交互
+- 长期记忆：基于两个 Markdown 文件（USER.md / MEMORY.md）的跨会话记忆，LLM 通过记忆工具自主读写，写入超限时自动反思整理，会话开始前注入冻结前缀
 - 配置集中在 YAML 文件
 
 ## 环境要求
@@ -69,6 +70,11 @@ session:                         # 会话管理（可选，缺省时使用默认
   db_path: "sessions.db"         # 会话数据库文件路径（相对运行目录）
   enable_fts: true               # 是否启用 FTS5 全文索引（不支持时降级为 LIKE 查询）
   auto_save: true                # 是否每轮问答后自动增量保存会话消息
+memory:                          # 长期记忆（可选，缺省时使用默认值）
+  enabled: true                  # 是否启用长期记忆
+  dir: "memory"                  # 记忆文件所在目录（USER.md 与 MEMORY.md 均存于此目录）
+  user_max_chars: 2000           # 用户文件字符上限，超限触发 LLM 反思整理
+  memory_max_chars: 4000         # 记忆文件字符上限，超限触发 LLM 反思整理
 ```
 
 环境变量覆盖（优先级高于配置文件）：
@@ -151,6 +157,19 @@ Agent 运行过程中消息历史不断增长，超过模型上下文窗口会�
 
 **FTS5 全文检索**：消息正文建立 FTS5 索引，便于后续按关键词检索历史对话；运行环境不支持 FTS5 时自动降级为 LIKE 查询。
 
+## 长期记忆
+
+启用长期记忆（`memory.enabled: true`）后，Agent 通过记忆工具（`add_memory` / `replace_memory` / `remove_memory`）在对话过程中自主读写两个本地 Markdown 文件，实现跨会话记忆。文件为自由格式 Markdown，可直接用编辑器查看与修改。
+
+**两个记忆文件**（参考 Hermes Agent 的记忆引导实践）：
+
+- `USER.md`（target=user）：用户档案——姓名、角色、时区、沟通偏好、反感事项、技术水平
+- `MEMORY.md`（target=memory）：Agent 笔记——环境事实、项目约定、工具怪癖、已完成工作、经验教训
+
+**会话前缀注入**：会话开始前读取两个文件全文，拼装为记忆前缀（含使用引导提示词 + 文件内容）注入到系统提示词最前面，整个会话期间冻结复用以命中 prefix cache。引导提示词始终注入（即使记忆为空），让 LLM 知道有记忆工具可用及何时使用。
+
+**反思整理**：每次写入后检查字符上限，超限时自动调用 LLM 对记忆全文做去重、合并冗余与精简表述，整理后原子写回文件。LLM 调用失败时保留写入前内容，不阻断主流程。
+
 ## 目录结构
 
 ```
@@ -164,11 +183,12 @@ src/sagent/
   core/                     ReAct 与 Plan 执行引擎、提示词
   context/                  上下文管理：token 估算、分层压缩、上下文管理器
   session/                  会话管理：数据模型、SQLite 持久化、会话管理器
+  memory/                   长期记忆：Markdown 文件存储、记忆管理器、提示词
   observability/            日志系统（JSON 结构化、按天滚动、trace_id）
   cli/                      命令行应用、斜杠命令解析
 tests/
   conftest.py               公共 fixture 与 FakeLLMClient
-  unit/                     单元测试（配置、工具、注册表、Plan 解析、上下文管理、会话存储与管理、命令解析，无需 LLM）
+  unit/                     单元测试（配置、工具、注册表、Plan 解析、上下文管理、会话存储与管理、记忆存储与管理与记忆工具、命令解析，无需 LLM）
   engines/                  引擎测试（ReAct / Plan，用 FakeLLMClient 离线回放）
   evals/                    Agent 能力评测（离线回放 + 可选真实 LLM）
 ```
@@ -184,7 +204,7 @@ python -m pytest
 
 测试分三层：
 
-- 单元测试：不依赖 LLM，覆盖配置加载、工具执行与容错、注册表、Plan 步骤解析。
+- 单元测试：不依赖 LLM，覆盖配置加载、工具执行与容错、注册表、Plan 步骤解析、上下文管理、会话存储与管理、长期记忆存储与管理、斜杠命令解析。
 - 引擎测试：使用 `FakeLLMClient`（`tests/conftest.py`）按预设响应队列离线回放，验证 ReAct / Plan 的多轮编排逻辑，快速且可复现。
 - 能力评测（`tests/evals`）：以数据形式集中定义评测场景。默认走离线回放；设置 `RUN_LLM_EVALS=1` 并配置好真实 LLM 后，会调用真实模型执行任务并用 LLM-as-judge 打分。
 

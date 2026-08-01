@@ -72,3 +72,18 @@ session:
   enable_fts: true
   # 是否每轮问答后自动增量保存会话消息
   auto_save: true
+
+# 长期记忆配置（可选，缺省时使用默认值）
+# 启用后基于两个本地 Markdown 文件持久化跨会话记忆：
+#   <dir>/USER.md   用户偏好与环境信息
+#   <dir>/MEMORY.md 项目上下文与学习到的经验
+# 文件内容为自由格式 Markdown，可直接用编辑器查看与修改
+memory:
+  # 是否启用长期记忆
+  enabled: true
+  # 记忆文件所在目录（相对运行目录），USER.md 与 MEMORY.md 均存于此目录
+  dir: "memory"
+  # 用户文件字符上限，超限时触发 LLM 反思整理（去重、合并冗余、精简表述）
+  user_max_chars: 2000
+  # 记忆文件字符上限，超限时触发 LLM 反思整理
+  memory_max_chars: 4000

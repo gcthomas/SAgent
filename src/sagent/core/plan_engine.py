@@ -42,11 +42,20 @@ class PlanEngine:
         if self._on_event:
             self._on_event(text)
 
-    def run(self, task: str) -> str:
-        """执行 Plan 模式任务：拆解 -> 分步执行 -> 汇总。"""
+    def run(self, task: str, memory_prefix: str | None = None) -> str:
+        """执行 Plan 模式任务：拆解 -> 分步执行 -> 汇总。
+
+        参数:
+            task: 用户任务/输入。
+            memory_prefix: 可选的记忆注入前缀，叠加到 ReAct 系统提示词之前
+                （而非替换）。会话开始时由调用方冻结构建一次，整个会话复用。
+        """
+        prompt = REACT_SYSTEM_PROMPT
+        if memory_prefix:
+            prompt = memory_prefix + "\n\n" + prompt
         # 注入了上下文管理器时，确保系统提示词在上下文中并添加用户原始任务
         if self._context_manager is not None:
-            self._context_manager.ensure_system_prompt(REACT_SYSTEM_PROMPT)
+            self._context_manager.ensure_system_prompt(prompt)
             self._context_manager.add_message({"role": "user", "content": task})
 
         steps = self._decompose(task)
@@ -54,7 +63,7 @@ class PlanEngine:
             # 拆解失败时回退为直接用 ReAct 执行整个任务
             self._emit("[提示] 未能拆解出步骤，直接执行整个任务。")
             logger.warning("Plan 拆解失败，回退 ReAct", extra={"event": "plan_fallback"})
-            return self._react.run(task)
+            return self._react.run(task, memory_prefix=memory_prefix)
 
         self._emit(f"[计划] 共拆解为 {len(steps)} 个步骤：")
         logger.info(
@@ -77,7 +86,7 @@ class PlanEngine:
                 f"当前需要完成的步骤: {step}\n"
                 f"请完成该步骤并给出结果。"
             )
-            result = self._react.run(step_task)
+            result = self._react.run(step_task, memory_prefix=memory_prefix)
             step_results.append(f"步骤 {idx}（{step}）结果:\n{result}")
 
         logger.info("Plan 汇总结果", extra={"event": "plan_summarize"})

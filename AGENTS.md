@@ -14,6 +14,7 @@
   - 工具系统基于 pydantic 定义参数 schema，对接 LLM function calling
   - 上下文管理：自动追踪 token 用量，超阈值时分层压缩（截断→卸载→摘要→裁剪），支持 API 精确 token 校准
   - 会话管理：会话历史持久化到 SQLite（FTS5 全文检索），双层存储模型（append-only 完整历史 + 压缩事件日志），增量保存，斜杠命令交互
+  - 长期记忆：基于两个 Markdown 文件（USER.md / MEMORY.md）的跨会话记忆，LLM 通过记忆工具自主读写，写入超限时自动反思整理，会话开始前注入冻结前缀
   - 兼容任意 OpenAI 兼容的 LLM 服务（通过 base_url 指定）
   - 配置集中在 YAML 文件，敏感项支持环境变量覆盖
   - 内置 JSON 结构化日志，按天滚动，带 trace_id 全链路关联
@@ -98,17 +99,22 @@ src/sagent/
     models.py               会话数据模型：SessionMeta、SessionMessage、CompactionEvent
     store.py                会话持久化存储：SQLite + FTS5，双层表结构（append-only 消息 + 压缩事件）
     manager.py              会话管理器：创建/切换/删除/增量保存/工作上下文还原，桥接 ContextManager
+  memory/
+    store.py                Markdown 文件记忆存储：USER.md / MEMORY.md 的加载/读取/追加/替换/删除/原子落盘/字符上限检查
+    manager.py              记忆管理器：会话前缀注入构造、写入超限反思整理，桥接 store 与 LLM
+    prompts.py              记忆提示词：使用引导（MEMORY_GUIDE_PROMPT）、反思整理（REFLECT_SYSTEM_PROMPT）、注入前缀构造
   tools/
     base.py                 Tool 抽象基类 + ToolProvider 接口（预留 MCP/skill）
     registry.py             ToolRegistry：注册、schema 输出、按名称执行
     file_tools.py           内置工具：read_file、write_file
     shell_tool.py           内置工具：run_shell
+    memory_tool.py          内置工具：add_memory、replace_memory、remove_memory（长期记忆读写）
     __init__.py             build_default_registry() 构建默认工具集
   observability/
     logging_setup.py        JSON 结构化日志、按天滚动、trace_id 上下文关联
 tests/
   conftest.py               公共 fixture：FakeLLMClient、make_tool_call、text_response（支持 usage）
-  unit/                     单元测试（配置、工具、注册表、Plan 解析、上下文管理、会话存储与管理、斜杠命令解析，无需 LLM）
+  unit/                     单元测试（配置、工具、注册表、Plan 解析、上下文管理、会话存储与管理、记忆存储与管理、记忆工具、斜杠命令解析，无需 LLM）
   engines/                  引擎测试（ReAct / Plan，用 FakeLLMClient 离线回放）
   evals/                    Agent 能力评测（离线回放 + 可选真实 LLM）
 ```
@@ -125,6 +131,9 @@ tests/
 - **`src/sagent/session/models.py`**：会话数据模型（pydantic）。`SessionMeta`（含 `persisted_seq` 已持久化游标）、`SessionMessage`（OpenAI 消息结构 + 单调递增 `seq`）、`CompactionEvent`（压缩事件：摘要文本 + 覆盖 seq 区间）。
 - **`src/sagent/session/store.py`**：会话持久化存储。基于 SQLite，双层表结构：`sessions` 表（元数据）、`messages` 表（append-only 完整历史，按 `seq` 递增）、`session_events` 表（压缩事件日志）。`append_messages()` 仅插入 `seq > persisted_seq` 的新消息实现增量写入；`build_working_context()` 由最近压缩摘要 + 其后原始消息拼接还原工作上下文；`append_compaction_event()` 记录压缩事件不改动原始历史。FTS5 全文索引不可用时自动降级为 LIKE 查询。
 - **`src/sagent/session/manager.py`**：会话管理器。协调 SessionStore 与 ContextManager，负责会话创建/切换/重命名/删除、增量保存与工作上下文还原。`save_current()` 调用 `export_new_messages` 导出新增消息并委托 Store 增量写入；`switch_session()` 通过 `build_working_context` 还原上下文并 `load_messages` 装入 ContextManager；通过 `set_compaction_callback` 注册回调，压缩发生时将压缩事件写入 `session_events` 而不删改已落盘历史。删除当前会话时自动切换到其他会话以保护状态。
+- **`src/sagent/memory/store.py`**：Markdown 文件记忆存储。维护两个本地 Markdown 文件（USER.md 与 MEMORY.md）的内容缓存，支持加载、读取全文、追加、替换、删除与字符上限检查。所有写操作先更新内存缓存再通过临时文件 + `os.replace` 原子落盘，避免中途异常导致文件损坏。不依赖 LLM 与 config 模块，构造时传入目录与字符上限。
+- **`src/sagent/memory/manager.py`**：记忆管理器。协调 MemoryStore 与 LLM 客户端，提供会话前缀注入与写入超限反思整理。`build_memory_prefix()` 读取两个文件全文拼装为记忆前缀文本（含使用引导提示词），会话开始时调用一次由调用方冻结复用；`add` / `replace` / `remove` 委托 store 完成写入，写入后超限则触发 `_reflect()` 调用 LLM 做去重/合并/精简并原子写回；LLM 调用失败时保留写入前内容，不抛异常、不阻断主流程。
+- **`src/sagent/tools/memory_tool.py`**：长期记忆读写工具。`add_memory` / `replace_memory` / `remove_memory` 三个工具，继承 Tool 基类，参数用 pydantic 模型定义 schema，执行委托 MemoryManager 对应方法。通过 `target` 参数区分目标文件（user→USER.md，memory→MEMORY.md）。
 - **`src/sagent/cli/commands.py`**：斜杠命令纯函数解析器。`parse_command(raw) -> ParsedCommand | None` 将 `/name arg...` 解析为命令名+参数结构，非斜杠输入返回 `None`。与命令族无关，未来新增任意 slash command 均复用此解析器。
 - **`src/sagent/cli/app.py`**：CLI 应用。构建 SessionStore/SessionManager（`session.enabled` 时）、交互循环中调用 `parse_command` 分发斜杠命令到 SessionManager、`auto_save` 时每轮问答后增量保存、退出时保存当前会话。
 - **`src/sagent/observability/logging_setup.py`**：日志系统。文件日志为 JSON 每行一条，按天滚动；控制台为纯文本。每次问答生成 trace_id 注入全部日志。
@@ -148,9 +157,10 @@ tests/
 ### 配置与数据建模
 
 - 配置结构使用 pydantic `BaseModel`，字段带 `Field(..., description=...)`
-- 配置模型包括：`LLMConfig`、`AgentConfig`、`LoggingConfig`、`ContextConfig`（上下文管理）、`SessionConfig`（会话管理）、`AppConfig`（顶层聚合）
+- 配置模型包括：`LLMConfig`、`AgentConfig`、`LoggingConfig`、`ContextConfig`（上下文管理）、`SessionConfig`（会话管理）、`MemoryConfig`（长期记忆）、`AppConfig`（顶层聚合）
 - `ContextConfig` 控制 token 预算（`max_context_tokens`）、压缩阈值（`compression_threshold` / `safe_threshold`）、压缩策略参数（`keep_recent_messages`、`max_tool_output_tokens`、`enable_summary`、`summary_max_tokens`）、token 计数方式（`token_counter_method`）、混合校准开关（`use_api_calibration`）
 - `SessionConfig` 控制会话管理（`enabled` 开关、`db_path` SQLite 路径、`enable_fts` FTS5 全文索引、`auto_save` 每轮自动增量保存）；`AppConfig.session` 缺省可用
+- `MemoryConfig` 控制长期记忆（`enabled` 开关、`dir` 记忆文件目录、`user_max_chars` / `memory_max_chars` 字符上限触发反思整理）；`AppConfig.memory` 缺省可用
 - 工具参数使用 pydantic 模型定义 `args_schema`，自动生成 JSON schema 供 function calling
 
 ### 日志
@@ -181,7 +191,7 @@ tests/
 
 ### 测试分层
 
-1. **单元测试**（`tests/unit/`）：不依赖 LLM，覆盖配置加载、工具执行与容错、注册表、Plan 步骤解析、上下文管理（压缩策略、token 计数、混合校准、seq 维护与增量导出）、会话存储（建表/CRUD/增量追加/压缩事件/工作上下文还原/FTS5 降级）、会话管理（创建/切换/增量保存/删除保护）、斜杠命令解析（`parse_command` 纯函数用例）
+1. **单元测试**（`tests/unit/`）：不依赖 LLM，覆盖配置加载、工具执行与容错、注册表、Plan 步骤解析、上下文管理（压缩策略、token 计数、混合校准、seq 维护与增量导出）、会话存储（建表/CRUD/增量追加/压缩事件/工作上下文还原/FTS5 降级）、会话管理（创建/切换/增量保存/删除保护）、记忆存储（加载/追加/替换/删除/原子落盘/字符上限检查）、记忆管理（前缀注入/反思整理/写入超限触发）、记忆工具（参数校验/委托执行）、斜杠命令解析（`parse_command` 纯函数用例）
 2. **引擎测试**（`tests/engines/`）：使用 `FakeLLMClient` 按预设响应队列离线回放，验证 ReAct / Plan 多轮编排逻辑，快速且可复现
 3. **能力评测**（`tests/evals/`）：以数据形式集中定义评测场景。默认走离线回放；设置 `RUN_LLM_EVALS=1` 调用真实模型并用 LLM-as-judge 打分
 

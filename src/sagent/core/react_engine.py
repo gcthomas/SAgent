@@ -49,17 +49,20 @@ class ReActEngine:
         if self._on_event:
             self._on_event(text)
 
-    def run(self, task: str, system_prompt: str | None = None) -> str:
+    def run(self, task: str, memory_prefix: str | None = None) -> str:
         """执行一个任务并返回最终答案。
 
         参数:
             task: 用户任务/输入。
-            system_prompt: 可选的自定义系统提示词，默认使用 ReAct 系统提示词。
+            memory_prefix: 可选的记忆注入前缀，叠加到 ReAct 系统提示词之前
+                （而非替换）。会话开始时由调用方冻结构建一次，整个会话复用。
 
         返回:
             最终答案文本。
         """
-        prompt = system_prompt or REACT_SYSTEM_PROMPT
+        prompt = REACT_SYSTEM_PROMPT
+        if memory_prefix:
+            prompt = memory_prefix + "\n\n" + prompt
         tools = self.registry.to_openai_schemas()
 
         logger.info(
