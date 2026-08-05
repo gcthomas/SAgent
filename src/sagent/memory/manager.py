@@ -18,6 +18,7 @@ from typing import Any
 
 from ..observability import get_logger
 from .prompts import REFLECT_SYSTEM_PROMPT, build_injection_prefix
+from .security import MemorySecurityScanner
 from .store import MemoryStore
 
 logger = get_logger(__name__)
@@ -31,15 +32,22 @@ class MemoryManager:
     与 context.strategies.LLMSummaryCompression 的调用约定一致。
     """
 
-    def __init__(self, store: MemoryStore, llm: Any) -> None:
+    def __init__(
+        self,
+        store: MemoryStore,
+        llm: Any,
+        scanner: MemorySecurityScanner | None = None,
+    ) -> None:
         """初始化记忆管理器。
 
         参数:
             store: 记忆文件存储实例。
             llm: LLM 客户端，需有 chat(messages, tools=None) 方法，返回对象含 content 属性。
+            scanner: 安全扫描器实例，仅供测试注入；缺省时强制创建默认扫描器。
         """
         self._store = store
         self._llm = llm
+        self._scanner = scanner if scanner is not None else MemorySecurityScanner()
 
     def build_memory_prefix(self) -> str:
         """构造记忆注入前缀。
@@ -55,6 +63,43 @@ class MemoryManager:
         memory_content = self._store.read_all("memory")
         return build_injection_prefix(user_content, memory_content)
 
+    def _scan(self, target: str, content: str) -> tuple[bool, str]:
+        """对内容执行安全扫描，返回 (是否通过, 处理后内容或错误字符串)。
+
+        参数:
+            target: 目标文件标识，"user" 或 "memory"。
+            content: 待扫描的原始内容。
+
+        返回:
+            元组 (是否通过, 处理后内容或错误字符串)。通过时第二项为净化后内容；
+            被拦截时第二项为以"错误:"开头的错误字符串。
+        """
+        result = self._scanner.scan(content)
+        if result.blocked:
+            logger.warning(
+                "记忆内容未通过安全扫描，已拒绝写入",
+                extra={
+                    "event": "memory_security_block",
+                    "target": target,
+                    "reasons": result.reasons,
+                    "categories": result.categories,
+                },
+            )
+            return (
+                False,
+                f"错误:记忆内容未通过安全扫描：{', '.join(result.reasons)}，已拒绝写入",
+            )
+        if result.sanitized != content:
+            logger.info(
+                "记忆内容已净化不可见字符",
+                extra={
+                    "event": "memory_security_sanitized",
+                    "target": target,
+                    "removed_chars": len(content) - len(result.sanitized),
+                },
+            )
+        return True, result.sanitized
+
     def add(self, target: str, content: str) -> str:
         """追加内容到目标记忆文件。
 
@@ -67,8 +112,11 @@ class MemoryManager:
         返回:
             返回给工具的结果字符串。
         """
-        self._store.append(target, content)
-        result = f"已添加到{target}记忆（{len(content)} 字符）"
+        ok, scanned = self._scan(target, content)
+        if not ok:
+            return scanned
+        self._store.append(target, scanned)
+        result = f"已添加到{target}记忆（{len(scanned)} 字符）"
         self._maybe_reflect(target)
         return result
 
@@ -85,7 +133,10 @@ class MemoryManager:
         返回:
             返回给工具的结果字符串。
         """
-        found = self._store.replace(target, old, new)
+        ok, scanned = self._scan(target, new)
+        if not ok:
+            return scanned
+        found = self._store.replace(target, old, scanned)
         if not found:
             return f"未在{target}记忆中找到待替换文本"
         result = f"已替换{target}记忆中的内容"
@@ -165,12 +216,15 @@ class MemoryManager:
                 extra={"event": "memory_reflect_empty", "target": target},
             )
             return
-        self._store.write_all(target, refined)
+        ok, scanned = self._scan(target, refined)
+        if not ok:
+            return
+        self._store.write_all(target, scanned)
         logger.info(
             "记忆反思整理完成",
             extra={
                 "event": "memory_reflect_done",
                 "target": target,
-                "refined_chars": len(refined),
+                "refined_chars": len(scanned),
             },
         )

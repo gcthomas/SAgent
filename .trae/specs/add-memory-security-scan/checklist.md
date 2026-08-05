@@ -1,0 +1,23 @@
+# Checklist
+
+- [x] `src/sagent/memory/security.py` 存在，含 `ScanResult` 与 `MemorySecurityScanner`，模块顶部有中文 docstring 且 `from __future__ import annotations`
+- [x] `MemorySecurityScanner` 无构造参数，四类规则全部启用、不可关闭
+- [x] 不可见字符净化覆盖 C0/C1（保留 `\t\n\r`）、零宽字符、双向控制符
+- [x] 凭证检测覆盖 PEM 私钥、通用赋值、OpenAI/AWS/GitHub/Slack/Google 平台前缀、Bearer token
+- [x] Shell 威胁检测覆盖 authorized_keys、/etc/passwd、/dev/tcp、rm -rf /、curl|sh、base64 -d | sh、eval 等，忽略大小写
+- [x] Prompt 注入检测采用组合模式（中英文），"忽略琐碎信息"类正常表述不误报
+- [x] `scan()` 主流程：先净化后拒绝类检测，任一拒绝类命中则 `blocked=True` 并收集 reasons/categories
+- [x] `MemoryManager.__init__` 增加可选 `scanner` 参数，缺省 `None` 时内部强制创建 `MemorySecurityScanner()`，绝不落入不扫描状态
+- [x] `MemoryManager.add` 在写入前 `_scan`，拦截返回"错误:"字符串且不落盘，通过用净化后内容写入
+- [x] `MemoryManager.replace` 对 `new` 扫描（`old` 不扫描），拦截返回错误字符串，通过用净化后 new 写入
+- [x] `MemoryManager._reflect` 整理后内容写回前 `_scan`，拦截则保留写入前内容、不抛异常
+- [x] `MemoryManager.remove` 不扫描，保留原逻辑
+- [x] 生产构造 `MemoryManager(store, llm)`（不传 scanner）自动启用扫描
+- [x] 拦截记 `event="memory_security_block"` WARNING 日志（含 target/reasons/categories）
+- [x] 净化记 `event="memory_security_sanitized"` INFO 日志（含 target/removed_chars）
+- [x] 不新增任何配置开关：`config/models.py` 无 `MemorySecurityConfig`，`config.example.yaml` 无 security 段
+- [x] `cli/app.py` 未被修改（`MemoryManager(memory_store, llm)` 构造自动启用扫描，零侵入）
+- [x] `MemoryStore` 未被修改（纯存储职责不变）
+- [x] `tools/memory_tool.py` 未被修改（工具层错误透传）
+- [x] 新增 `tests/unit/test_memory_security.py`，覆盖四类规则命中/未误报、`MemoryManager` 集成（生产构造自动扫描/拦截不落盘/净化后落盘/`_reflect` 拦截/fake 注入）、审计日志事件
+- [x] `python -m pytest` 全部通过，无回归
