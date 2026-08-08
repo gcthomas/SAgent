@@ -184,8 +184,7 @@ class MemorySecurityScanner:
         返回:
             元组 (净化后文本, 移除字符数)。
         """
-        removed = len(_INVISIBLE_RE.findall(content))
-        sanitized = _INVISIBLE_RE.subn('', content)
+        sanitized, removed = _INVISIBLE_RE.subn('', content)
         return sanitized, removed
 
     def _detect_credentials(self, content: str) -> list[str]:
