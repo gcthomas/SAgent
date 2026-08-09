@@ -6,7 +6,9 @@
 
 from __future__ import annotations
 
+import base64
 import subprocess
+import sys
 
 from pydantic import BaseModel, Field
 
@@ -32,15 +34,28 @@ class ShellTool(Tool):
 
     def run(self, args: ShellArgs) -> str:
         try:
-            completed = subprocess.run(
-                args.command,
-                shell=True,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=args.timeout,
-            )
+            if sys.platform == "win32":
+                # Windows 上通过 PowerShell 的 -EncodedCommand 执行命令
+                # 将命令以 UTF-16LE 编码后 Base64 编码传入，避免双引号与转义符被 shell 二次解析
+                encoded = base64.b64encode(args.command.encode("utf-16-le")).decode("ascii")
+                completed = subprocess.run(
+                    ["powershell", "-NoProfile", "-EncodedCommand", encoded],
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=args.timeout,
+                )
+            else:
+                completed = subprocess.run(
+                    args.command,
+                    shell=True,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=args.timeout,
+                )
         except subprocess.TimeoutExpired:
             return f"错误: 命令执行超时（超过 {args.timeout} 秒）: {args.command}"
 

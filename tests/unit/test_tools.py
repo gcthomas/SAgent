@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import datetime
+import sys
+
 from sagent.tools import build_default_registry
 from sagent.tools.file_tools import ReadFileTool, WriteFileTool
 from sagent.tools.registry import ToolRegistry
+from sagent.tools.shell_tool import ShellArgs, ShellTool
 
 
 def test_to_openai_schema_shape():
@@ -79,3 +83,21 @@ def test_register_empty_name_raises():
 
     with pytest.raises(ValueError):
         registry.register(Bad())
+
+
+def test_run_shell_with_quoted_args():
+    """验证 run_shell 能正确执行带双引号参数的命令，不被 shell 二次解析。"""
+    tool = ShellTool()
+    if sys.platform == "win32":
+        # Windows 上通过 PowerShell -EncodedCommand 执行，双引号参数不应被破坏
+        args = ShellArgs(command='Get-Date -Format "yyyy-MM-dd"')
+        result = tool.run(args)
+        assert "退出码: 0" in result
+        # 输出应包含当天日期（yyyy-MM-dd 格式）
+        today = datetime.date.today().strftime("%Y-%m-%d")
+        assert today in result
+    else:
+        args = ShellArgs(command='echo "hello world"')
+        result = tool.run(args)
+        assert "退出码: 0" in result
+        assert "hello world" in result
