@@ -20,6 +20,7 @@ from ..observability import get_logger, new_trace_id, setup_logging
 from ..session.manager import SessionManager
 from ..session.store import SessionStore
 from ..tools import AddMemoryTool, RemoveMemoryTool, ReplaceMemoryTool, build_default_registry
+from ..tools.mcp import MCPSessionManager, build_mcp_providers
 from .commands import ParsedCommand, parse_command
 
 # 退出命令
@@ -200,6 +201,14 @@ def run() -> int:
         registry.register(ReplaceMemoryTool(memory_manager))
         registry.register(RemoveMemoryTool(memory_manager))
 
+    # 构建 MCP 工具提供者（仅当 mcp 启用时）；启动会话管理器并注册 MCP 工具
+    mcp_session_manager: MCPSessionManager | None = None
+    if config.mcp.enabled:
+        mcp_session_manager = MCPSessionManager()
+        mcp_session_manager.start()
+        for provider in build_mcp_providers(config.mcp, mcp_session_manager):
+            registry.register_provider(provider)
+
     # 构建会话管理器（必须在 build_engine 之前，
     # 因为 SessionManager 构造时会向 context_manager 注册压缩回调）
     session_store = None
@@ -235,6 +244,10 @@ def run() -> int:
         print(f"记忆: 已启用 | {config.memory.dir}/ @ {Path.cwd()}")
     else:
         print("记忆: 未启用")
+    if mcp_session_manager is not None:
+        mcp_servers = [s.name for s in config.mcp.servers if s.enabled]
+        mcp_tool_count = sum(1 for t in registry.list_tools() if t.name.startswith("mcp_"))
+        print(f"MCP: 已启用 | 服务器: {', '.join(mcp_servers) or '无'} | 工具: {mcp_tool_count} 个")
     print("输入你的问题开始对话；输入 exit / quit 退出。")
     print("=" * 60)
 
@@ -248,6 +261,8 @@ def run() -> int:
                     session_manager.save_current()
                 except Exception:
                     logger.exception("退出前会话保存失败", extra={"event": "session_save_error"})
+            if mcp_session_manager is not None:
+                mcp_session_manager.shutdown()
             print("\n再见。")
             return 0
 
@@ -259,6 +274,8 @@ def run() -> int:
                     session_manager.save_current()
                 except Exception:
                     logger.exception("退出前会话保存失败", extra={"event": "session_save_error"})
+            if mcp_session_manager is not None:
+                mcp_session_manager.shutdown()
             print("再见。")
             logger.info("用户退出", extra={"event": "exit"})
             return 0

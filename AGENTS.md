@@ -4,11 +4,11 @@
 
 ## 项目概述
 
-**SAgent** 是一个简单、通用、可扩展的 CLI Agent 应用。基于 OpenAI SDK 调用大模型，支持 ReAct 与 Plan 两种执行模式，内置文件读写与 Shell 执行工具，并为未来 MCP / skill 扩展预留接口。
+**SAgent** 是一个简单、通用、可扩展的 CLI Agent 应用。基于 OpenAI SDK 调用大模型，支持 ReAct 与 Plan 两种执行模式，内置文件读写与 Shell 执行工具，并通过 MCP 协议连接外部工具服务器扩展 Agent 能力。
 
 - **项目类型**：CLI 工具 / Python 应用
 - **核心功能**：命令行交互式 Agent，支持工具调用与多轮编排
-- **技术栈**：Python 3.10+、openai SDK、pydantic v2、pyyaml、pytest、sqlite3（标准库）
+- **技术栈**：Python 3.10+、openai SDK、pydantic v2、pyyaml、mcp SDK、pytest、sqlite3（标准库）
 - **架构说明**：
   - 两种执行模式：ReAct（推理-行动-观察循环）、Plan（拆解-逐步执行-汇总）
   - 工具系统基于 pydantic 定义参数 schema，对接 LLM function calling
@@ -105,12 +105,18 @@ src/sagent/
     security.py             记忆安全扫描器：写入前检测凭证泄露、Shell 后门、Prompt 注入、净化不可见字符（默认启用、不可关闭）
     prompts.py              记忆提示词：使用引导（MEMORY_GUIDE_PROMPT）、反思整理（REFLECT_SYSTEM_PROMPT）、注入前缀构造
   tools/
-    base.py                 Tool 抽象基类 + ToolProvider 接口（预留 MCP/skill）
+    base.py                 Tool 抽象基类 + ToolProvider 接口（已实现 MCP 接入）
     registry.py             ToolRegistry：注册、schema 输出、按名称执行
     file_tools.py           内置工具：read_file、write_file
     shell_tool.py           内置工具：run_shell
     memory_tool.py          内置工具：add_memory、replace_memory、remove_memory（长期记忆读写）
-    __init__.py             build_default_registry() 构建默认工具集
+    __init__.py             build_default_registry() 构建默认工具集；build_mcp_providers() 构建 MCP 提供者列表
+    mcp/                    MCP 工具提供者子包
+      filtering.py          ToolFilter：allow/deny 白名单/黑名单过滤
+      session_manager.py    MCPSessionManager：后台事件循环线程桥接异步 MCP SDK，管理会话生命周期
+      tool.py               MCPTool：将 MCP 工具包装为本地 Tool，覆写 schema 生成与参数校验
+      provider.py           MCPToolProvider：实现 ToolProvider，连接->发现->过滤->返回 MCPTool 列表
+      __init__.py           包公开接口与 build_mcp_providers() 工厂函数
   observability/
     logging_setup.py        JSON 结构化日志、按天滚动、trace_id 上下文关联
 tests/
@@ -138,6 +144,10 @@ tests/
 - **`src/sagent/tools/memory_tool.py`**：长期记忆读写工具。`add_memory` / `replace_memory` / `remove_memory` 三个工具，继承 Tool 基类，参数用 pydantic 模型定义 schema，执行委托 MemoryManager 对应方法。通过 `target` 参数区分目标文件（user→USER.md，memory→MEMORY.md）。
 - **`src/sagent/cli/commands.py`**：斜杠命令纯函数解析器。`parse_command(raw) -> ParsedCommand | None` 将 `/name arg...` 解析为命令名+参数结构，非斜杠输入返回 `None`。与命令族无关，未来新增任意 slash command 均复用此解析器。
 - **`src/sagent/cli/app.py`**：CLI 应用。构建 SessionStore/SessionManager（`session.enabled` 时）、交互循环中调用 `parse_command` 分发斜杠命令到 SessionManager、`auto_save` 时每轮问答后增量保存、退出时保存当前会话。
+- **`src/sagent/tools/mcp/session_manager.py`**：MCP 会话管理器。通过后台 daemon 线程运行 asyncio 事件循环，桥接异步 MCP SDK 与同步项目代码。`start()` 启动后台循环；`connect_server(config)` 在循环中创建传输连接（stdio/sse/streamable_http）与 ClientSession，执行 initialize 握手，保持会话存活，返回发现的工具列表（连接失败返回空列表）；`call_tool(server, tool, args)` 通过 `run_coroutine_threadsafe` 提交异步调用并同步等待结果（超时返回错误字符串）；`shutdown()` 逆序关闭所有上下文并停止循环。每个服务器独立配置 connect_timeout（默认 30s）与 call_timeout（默认 60s）。
+- **`src/sagent/tools/mcp/tool.py`**：MCP 工具包装。`MCPTool` 继承 `Tool` 基类，覆写 `to_openai_schema()` 直接使用 MCP 原始 JSON schema（不依赖 pydantic model_json_schema），覆写 `validate_args()` 直接返回原始 dict（MCP 服务端负责校验），`run()` 委托 `MCPSessionManager.call_tool()` 执行。工具名强制 `mcp_{server}_{tool}` 前缀，防冲突且可辨识来源。
+- **`src/sagent/tools/mcp/provider.py`**：MCP 工具提供者。`MCPToolProvider` 实现 `ToolProvider` 接口，`provide_tools()` 中调用 `session_manager.connect_server` 连接并发现工具，用 `ToolFilter` 过滤，为每个通过过滤的工具创建 `MCPTool` 实例返回。连接失败返回空列表不抛异常。
+- **`src/sagent/tools/mcp/filtering.py`**：MCP 工具过滤器。纯 Python 实现不依赖 MCP SDK。`ToolFilter(allow, deny)` 通过 allow/deny 两个列表控制白名单/黑名单：均空不过滤、allow 非空白名单、deny 非空黑名单、两者均非空先白名单再排除 deny。
 - **`src/sagent/observability/logging_setup.py`**：日志系统。文件日志为 JSON 每行一条，按天滚动；控制台为纯文本。每次问答生成 trace_id 注入全部日志。
 
 ## 代码规范
@@ -163,6 +173,7 @@ tests/
 - `ContextConfig` 控制 token 预算（`max_context_tokens`）、压缩阈值（`compression_threshold` / `safe_threshold`）、压缩策略参数（`keep_recent_messages`、`max_tool_output_tokens`、`enable_summary`、`summary_max_tokens`）、token 计数方式（`token_counter_method`）、混合校准开关（`use_api_calibration`）
 - `SessionConfig` 控制会话管理（`enabled` 开关、`db_path` SQLite 路径、`enable_fts` FTS5 全文索引、`auto_save` 每轮自动增量保存）；`AppConfig.session` 缺省可用
 - `MemoryConfig` 控制长期记忆（`enabled` 开关、`dir` 记忆文件目录、`user_max_chars` / `memory_max_chars` 字符上限触发反思整理）；`AppConfig.memory` 缺省可用
+- `MCPConfig` 控制 MCP 工具提供者（`enabled` 开关默认 false、`servers` 服务器配置列表）；`MCPServerConfig` 定义单个服务器（`name`、`transport` stdio/sse/streamable_http、`command`/`args`/`env`/`cwd` stdio 参数、`url` 远程地址、`enabled` 服务器开关、`tool_filter` 工具过滤、`connect_timeout` 连接超时默认 30 秒、`call_timeout` 调用超时默认 60 秒）；`ToolFilterConfig` 控制工具过滤（`allow`/`deny` 列表）；`AppConfig.mcp` 缺省可用
 - 工具参数使用 pydantic 模型定义 `args_schema`，自动生成 JSON schema 供 function calling
 
 ### 日志
@@ -233,7 +244,7 @@ tests/
 - **新增工具**：详见"代码规范 > 工具开发约定"章节
 - **新增压缩策略**：继承 `sagent.context.strategies.CompressionStrategy`，实现 `compress(messages) -> list`，在 `ContextManager.__init__` 中实例化并在 `_compress()` 中按需调用
 - **新增斜杠命令**：`cli/commands.py` 中的 `parse_command` 为通用纯函数解析器，新增任意 slash command 均复用该解析器，仅需在 `cli/app.py` 的分发逻辑中增加对应分支；解析用例统一并入 `tests/unit/test_cli.py`
-- **MCP / skill 接入**：实现 `sagent.tools.base.ToolProvider` 接口，通过 `ToolRegistry.register_provider()` 接入（当前仅预留接口）
+- **MCP 工具接入**：已实现 `sagent.tools.mcp.MCPToolProvider`（实现 `ToolProvider` 接口），通过 `build_mcp_providers(config, session_manager)` 构建提供者列表，逐个调用 `registry.register_provider()` 注册。配置在 `config.yaml` 的 `mcp` 段，支持 stdio/sse/streamable_http 三种传输方式，工具级 allow/deny 过滤与服务器级 enabled 开关，工具名强制 `mcp_{server}_{tool}` 前缀。详见 `tools/mcp/` 子包
 - **新增执行模式**：参考 `ReActEngine` / `PlanEngine` 实现引擎类，在 `cli/app.py` 的 `build_engine()` 中添加分支
 
 ## 特殊限制

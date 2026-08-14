@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class LLMConfig(BaseModel):
@@ -121,6 +121,65 @@ class MemoryConfig(BaseModel):
     memory_max_chars: int = Field(default=4000, description="记忆文件字符上限")
 
 
+class ToolFilterConfig(BaseModel):
+    """MCP 工具过滤配置。
+
+    通过 allow / deny 两个列表控制白名单/黑名单，无需 mode 参数：
+    - 均为空：不过滤，所有工具通过
+    - allow 非空：只有 allow 列表中的工具通过（白名单）
+    - deny 非空：deny 列表中的工具被拦截（黑名单）
+    - 均非空：先白名单过滤，再从结果中移除 deny 中的工具
+    """
+
+    allow: list[str] = Field(default_factory=list, description="白名单工具名列表，非空时仅允许这些工具")
+    deny: list[str] = Field(default_factory=list, description="黑名单工具名列表，非空时排除这些工具")
+
+
+class MCPServerConfig(BaseModel):
+    """单个 MCP 服务器配置。
+
+    支持 stdio / sse / streamable_http 三种传输方式。
+    """
+
+    # 服务器名称（唯一标识，用于工具名前缀 mcp_{name}_{tool}）
+    name: str = Field(..., description="服务器名称（唯一标识，用于工具名前缀）")
+    # 传输方式
+    transport: Literal["stdio", "sse", "streamable_http"] = Field(default="stdio", description="传输方式")
+    # stdio 模式：命令与参数
+    command: str = Field(default="", description="stdio 模式下要执行的命令")
+    args: list[str] = Field(default_factory=list, description="stdio 模式下命令的参数列表")
+    env: dict[str, str] = Field(default_factory=dict, description="stdio 模式下子进程的环境变量")
+    cwd: str = Field(default="", description="stdio 模式下子进程的工作目录")
+    # sse / streamable_http 模式
+    url: str = Field(default="", description="sse / streamable_http 模式的服务器地址")
+    # 服务器级开关
+    enabled: bool = Field(default=True, description="是否启用该服务器（禁用则不连接）")
+    # 工具过滤
+    tool_filter: ToolFilterConfig = Field(default_factory=ToolFilterConfig, description="工具过滤配置")
+    # 超时控制
+    connect_timeout: float = Field(default=30.0, description="连接超时（秒，含握手），默认 30 秒")
+    call_timeout: float = Field(default=60.0, description="工具调用超时（秒），默认 60 秒")
+
+    @model_validator(mode="after")
+    def validate_transport_fields(self) -> MCPServerConfig:
+        """校验传输方式对应的必填字段：stdio 需 command，sse/streamable_http 需 url。"""
+        if self.transport == "stdio" and not self.command:
+            raise ValueError("stdio 传输方式需要配置 command 字段")
+        if self.transport in ("sse", "streamable_http") and not self.url:
+            raise ValueError(f"{self.transport} 传输方式需要配置 url 字段")
+        return self
+
+
+class MCPConfig(BaseModel):
+    """MCP 配置。
+
+    控制是否启用 MCP 工具提供者及其服务器列表。
+    """
+
+    enabled: bool = Field(default=False, description="是否启用 MCP 工具提供者")
+    servers: list[MCPServerConfig] = Field(default_factory=list, description="MCP 服务器配置列表")
+
+
 class AppConfig(BaseModel):
     """应用总配置。"""
 
@@ -130,3 +189,4 @@ class AppConfig(BaseModel):
     context: ContextConfig = Field(default_factory=ContextConfig, description="上下文管理配置")
     session: SessionConfig = Field(default_factory=SessionConfig, description="会话管理配置")
     memory: MemoryConfig = Field(default_factory=MemoryConfig, description="长期记忆配置")
+    mcp: MCPConfig = Field(default_factory=MCPConfig, description="MCP 配置")

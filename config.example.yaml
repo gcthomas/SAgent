@@ -87,3 +87,62 @@ memory:
   user_max_chars: 2000
   # 记忆文件字符上限，超限时触发 LLM 反思整理
   memory_max_chars: 4000
+
+# MCP 工具提供者配置（可选，缺省时默认不启用）
+# 启用后可连接外部 MCP（Model Context Protocol）服务器，扩展 Agent 的工具能力
+# MCP 服务器暴露的工具会以 mcp_{server_name}_{tool_name} 格式注册到工具表
+# 支持三种传输方式：stdio（本地子进程）、sse（HTTP 流式）、streamable_http
+mcp:
+  # 是否启用 MCP 工具提供者
+  enabled: false
+
+  # MCP 服务器列表
+  servers:
+    # 示例 1：stdio 传输（本地子进程）
+    # 通过启动子进程并经 stdin/stdout 通信连接
+    - name: "filesystem"
+      transport: "stdio"
+      command: "npx"
+      args: ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+      env: {}
+      cwd: ""
+      enabled: true
+      # 工具过滤（可选，默认不过滤）
+      # allow: 白名单，仅允许列出的工具
+      # deny: 黑名单，排除列出的工具
+      # 两者均非空时先白名单过滤再排除黑名单
+      tool_filter:
+        allow: []
+        deny: []
+      # 连接超时（秒，含握手），默认 30 秒
+      connect_timeout: 30
+      # 工具调用超时（秒），默认 60 秒
+      call_timeout: 60
+
+    # 示例 2：SSE 传输（远程 HTTP 流式）
+    # - name: "remote-sse"
+    #   transport: "sse"
+    #   url: "http://localhost:8080/sse"
+    #   enabled: true
+    #   tool_filter:
+    #     allow: []
+    #     deny: []
+    #   connect_timeout: 30
+    #   call_timeout: 60
+
+    # 示例 3：Streamable HTTP 传输
+    # - name: "remote-http"
+    #   transport: "streamable_http"
+    #   url: "http://localhost:8080/mcp"
+    #   enabled: true
+    #   tool_filter:
+    #     allow: []
+    #     deny: []
+    #   connect_timeout: 30
+    #   call_timeout: 60
+
+    # 示例 4：被禁用的服务器（不会连接）
+    # - name: "disabled-server"
+    #   transport: "stdio"
+    #   command: "some-command"
+    #   enabled: false
