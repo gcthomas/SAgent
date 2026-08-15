@@ -216,7 +216,8 @@ def run() -> int:
     if config.session.enabled:
         session_store = SessionStore(config.session.db_path, config.session.enable_fts)
         session_manager = SessionManager(session_store, context_manager, mode=mode)
-        session_manager.ensure_current_session()
+        # 不在启动时自动创建会话，延迟到首次用户输入时按需创建，
+        # 避免用户直接退出或仅浏览历史时产生垃圾空会话
 
     engine = build_engine(
         mode, llm, registry, config.agent, on_event=_print_event,
@@ -239,6 +240,8 @@ def run() -> int:
         cur = session_manager.get_current_session()
         if cur is not None:
             print(f"当前会话: {cur.id} | {cur.title}")
+        else:
+            print("会话: 尚未创建（首次对话时自动创建）")
         print("会话命令: /new /sessions /switch /rename /delete /search /session /help")
     if memory_manager is not None:
         print(f"记忆: 已启用 | {config.memory.dir}/ @ {Path.cwd()}")
@@ -292,6 +295,11 @@ def run() -> int:
             "收到用户输入",
             extra={"event": "user_input", "input": user_input, "mode": mode},
         )
+
+        # 延迟创建会话：首次真正对话时按需创建，避免启动即产生空会话。
+        # 若用户已通过 /new 或 /switch 显式创建/切换会话，则 get_current_session() 返回非 None，不会重复创建。
+        if session_manager is not None and session_manager.get_current_session() is None:
+            session_manager.ensure_current_session()
 
         try:
             answer = engine.run(user_input, memory_prefix=memory_prefix)
