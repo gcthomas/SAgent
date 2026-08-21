@@ -10,7 +10,7 @@ import json
 import time
 from typing import Any
 
-from ..observability import get_logger
+from ..observability import Span, get_logger
 from .base import Tool, ToolProvider
 
 logger = get_logger(__name__)
@@ -53,7 +53,7 @@ class ToolRegistry:
             arguments: 参数，可为 JSON 字符串（来自 LLM tool_calls）或 dict。
 
         返回:
-            执行结果字符串；出现任何错误时返回以“错误:”开头的说明文本。
+            执行结果字符串；出现任何错误时返回以"错误:"开头的说明文本。
         """
         tool = self.get(name)
         if tool is None:
@@ -91,27 +91,34 @@ class ToolRegistry:
             )
             return f"错误: 工具 '{name}' 的参数校验失败: {exc}"
 
-        # 执行
-        start = time.perf_counter()
-        try:
-            result = tool.run(args_model)
-        except Exception as exc:  # 工具执行期异常
-            logger.exception(
-                "工具执行失败",
-                extra={
-                    "event": "tool_error",
-                    "tool": name,
-                    "latency_ms": round((time.perf_counter() - start) * 1000, 1),
-                },
-            )
-            return f"错误: 工具 '{name}' 执行失败: {exc}"
+        # 执行（添加 Span 埋点）
+        with Span("tool.execute") as span:
+            span.set_attribute("tool.name", name)
+            start = time.perf_counter()
+            try:
+                result = tool.run(args_model)
+            except Exception as exc:  # 工具执行期异常
+                span.set_attribute("error.type", type(exc).__name__)
+                span.set_status("error")
+                logger.exception(
+                    "工具执行失败",
+                    extra={
+                        "event": "tool_error",
+                        "tool": name,
+                        "latency_ms": round((time.perf_counter() - start) * 1000, 1),
+                    },
+                )
+                return f"错误: 工具 '{name}' 执行失败: {exc}"
+            latency_ms = round((time.perf_counter() - start) * 1000, 1)
+            span.set_attribute("tool.latency_ms", latency_ms)
+            span.set_attribute("tool.result_length", len(result))
 
         logger.info(
             "工具执行完成",
             extra={
                 "event": "tool_result",
                 "tool": name,
-                "latency_ms": round((time.perf_counter() - start) * 1000, 1),
+                "latency_ms": latency_ms,
                 "result_length": len(result),
             },
         )

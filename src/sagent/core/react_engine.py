@@ -11,7 +11,7 @@ from typing import Any, Callable
 from ..config.models import AgentConfig
 from ..context.context_manager import ContextManager
 from ..llm.client import LLMClient
-from ..observability import get_logger
+from ..observability import Span, get_logger
 from ..tools.registry import ToolRegistry
 from .prompts import REACT_SYSTEM_PROMPT
 
@@ -43,6 +43,7 @@ class ReActEngine:
         self.config = agent_config
         self._on_event = on_event
         self._context_manager = context_manager
+        self._outcome = "completed"
 
     def _emit(self, text: str) -> None:
         """输出过程事件。"""
@@ -65,65 +66,72 @@ class ReActEngine:
             prompt = memory_prefix + "\n\n" + prompt
         tools = self.registry.to_openai_schemas()
 
-        logger.info(
-            "ReAct 开始执行",
-            extra={"event": "react_start", "max_iterations": self.config.max_iterations},
-        )
-
-        # 注入了上下文管理器时，走跨轮次上下文持久化路径
-        if self._context_manager is not None:
-            return self._run_with_context(task, prompt, tools)
-
-        # 无上下文管理器时，保持原有逻辑
-        messages: list[dict[str, Any]] = [
-            {"role": "system", "content": prompt},
-            {"role": "user", "content": task},
-        ]
-
-        for iteration in range(1, self.config.max_iterations + 1):
-            logger.debug(
-                "ReAct 迭代",
-                extra={"event": "react_iteration", "iteration": iteration},
+        with Span("agent.react") as span:
+            span.set_attribute("sagent.max_iterations", self.config.max_iterations)
+            logger.info(
+                "ReAct 开始执行",
+                extra={"event": "react_start", "max_iterations": self.config.max_iterations},
             )
-            response = self.llm.chat(messages, tools=tools)
 
-            # 没有工具调用，视为最终答案
-            if not response.has_tool_calls:
-                if response.content:
-                    self._emit(f"[最终答案] {response.content}")
-                logger.info(
-                    "ReAct 得到最终答案",
-                    extra={"event": "react_final", "iteration": iteration},
+            # 注入了上下文管理器时，走跨轮次上下文持久化路径
+            if self._context_manager is not None:
+                return self._run_with_context(task, prompt, tools)
+
+            # 无上下文管理器时，保持原有逻辑
+            messages: list[dict[str, Any]] = [
+                {"role": "system", "content": prompt},
+                {"role": "user", "content": task},
+            ]
+
+            for iteration in range(1, self.config.max_iterations + 1):
+                span.add_event("iteration", {"index": iteration})
+                logger.debug(
+                    "ReAct 迭代",
+                    extra={"event": "react_iteration", "iteration": iteration},
                 )
-                return response.content or "（模型未返回内容）"
+                response = self.llm.chat(messages, tools=tools)
 
-            # 记录助手消息（包含 tool_calls），供后续工具结果对齐
-            messages.append(self._assistant_message(response))
+                # 没有工具调用，视为最终答案
+                if not response.has_tool_calls:
+                    if response.content:
+                        self._emit(f"[最终答案] {response.content}")
+                    logger.info(
+                        "ReAct 得到最终答案",
+                        extra={"event": "react_final", "iteration": iteration},
+                    )
+                    return response.content or "（模型未返回内容）"
 
-            # 依次执行工具调用并追加观察结果
-            for call in response.tool_calls:
-                self._emit(f"[行动] 调用工具 {call['name']}，参数: {call['arguments']}")
-                observation = self.registry.execute(call["name"], call["arguments"])
-                self._emit(f"[观察] {observation}")
-                messages.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": call["id"],
-                        "content": observation,
-                    }
+                # 记录助手消息（包含 tool_calls），供后续工具结果对齐
+                messages.append(self._assistant_message(response))
+
+                # 依次执行工具调用并追加观察结果
+                for call in response.tool_calls:
+                    self._emit(f"[行动] 调用工具 {call['name']}，参数: {call['arguments']}")
+                    observation = self.registry.execute(call["name"], call["arguments"])
+                    self._emit(f"[观察] {observation}")
+                    messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": call["id"],
+                            "content": observation,
+                        }
+                    )
+
+            # 达到最大迭代次数仍未结束，进行最后一次无工具的收尾请求
+            span.set_attribute("sagent.outcome", "max_iterations")
+            self._outcome = "max_iterations"
+            with Span("agent.finalize") as finalize_span:
+                finalize_span.set_attribute("sagent.max_iterations", self.config.max_iterations)
+                self._emit(f"[提示] 已达到最大迭代次数 {self.config.max_iterations}，尝试给出当前结论。")
+                logger.warning(
+                    "ReAct 达到最大迭代次数",
+                    extra={"event": "react_max_iterations", "max_iterations": self.config.max_iterations},
                 )
-
-        # 达到最大迭代次数仍未结束，进行最后一次无工具的收尾请求
-        self._emit(f"[提示] 已达到最大迭代次数 {self.config.max_iterations}，尝试给出当前结论。")
-        logger.warning(
-            "ReAct 达到最大迭代次数",
-            extra={"event": "react_max_iterations", "max_iterations": self.config.max_iterations},
-        )
-        final = self.llm.chat(messages, tools=None)
-        return (
-            final.content
-            or f"未能在 {self.config.max_iterations} 轮内完成任务，请尝试拆分任务或增大 max_iterations。"
-        )
+                final = self.llm.chat(messages, tools=None)
+            return (
+                final.content
+                or f"未能在 {self.config.max_iterations} 轮内完成任务，请尝试拆分任务或增大 max_iterations。"
+            )
 
     def _run_with_context(self, task: str, prompt: str, tools: list[dict[str, Any]]) -> str:
         """使用上下文管理器执行任务，实现跨轮次上下文持久化。
@@ -141,56 +149,64 @@ class ReActEngine:
         cm.ensure_system_prompt(prompt)
         cm.add_message({"role": "user", "content": task})
 
-        for iteration in range(1, self.config.max_iterations + 1):
-            logger.debug(
-                "ReAct 迭代（上下文模式）",
-                extra={"event": "react_iteration", "iteration": iteration},
+        with Span("agent.react") as span:
+            span.set_attribute("sagent.max_iterations", self.config.max_iterations)
+
+            for iteration in range(1, self.config.max_iterations + 1):
+                span.add_event("iteration", {"index": iteration})
+                logger.debug(
+                    "ReAct 迭代（上下文模式）",
+                    extra={"event": "react_iteration", "iteration": iteration},
+                )
+                messages = cm.get_messages()
+                response = self.llm.chat(messages, tools=tools)
+                cm.record_llm_usage(response.usage)
+
+                # 没有工具调用，视为最终答案
+                if not response.has_tool_calls:
+                    cm.add_message({"role": "assistant", "content": response.content})
+                    if response.content:
+                        self._emit(f"[最终答案] {response.content}")
+                    logger.info(
+                        "ReAct 得到最终答案",
+                        extra={"event": "react_final", "iteration": iteration},
+                    )
+                    return response.content or "（模型未返回内容）"
+
+                # 记录助手消息（包含 tool_calls）到上下文
+                cm.add_message(self._assistant_message(response))
+
+                # 依次执行工具调用并追加观察结果到上下文
+                for call in response.tool_calls:
+                    self._emit(f"[行动] 调用工具 {call['name']}，参数: {call['arguments']}")
+                    observation = self.registry.execute(call["name"], call["arguments"])
+                    self._emit(f"[观察] {observation}")
+                    cm.add_message(
+                        {
+                            "role": "tool",
+                            "tool_call_id": call["id"],
+                            "content": observation,
+                        }
+                    )
+
+            # 达到最大迭代次数仍未结束，进行最后一次无工具的收尾请求
+            span.set_attribute("sagent.outcome", "max_iterations")
+            self._outcome = "max_iterations"
+            with Span("agent.finalize") as finalize_span:
+                finalize_span.set_attribute("sagent.max_iterations", self.config.max_iterations)
+                self._emit(f"[提示] 已达到最大迭代次数 {self.config.max_iterations}，尝试给出当前结论。")
+                logger.warning(
+                    "ReAct 达到最大迭代次数",
+                    extra={"event": "react_max_iterations", "max_iterations": self.config.max_iterations},
+                )
+                messages = cm.get_messages()
+                final = self.llm.chat(messages, tools=None)
+                cm.record_llm_usage(final.usage)
+                cm.add_message({"role": "assistant", "content": final.content})
+            return (
+                final.content
+                or f"未能在 {self.config.max_iterations} 轮内完成任务，请尝试拆分任务或增大 max_iterations。"
             )
-            messages = cm.get_messages()
-            response = self.llm.chat(messages, tools=tools)
-            cm.record_llm_usage(response.usage)
-
-            # 没有工具调用，视为最终答案
-            if not response.has_tool_calls:
-                cm.add_message({"role": "assistant", "content": response.content})
-                if response.content:
-                    self._emit(f"[最终答案] {response.content}")
-                logger.info(
-                    "ReAct 得到最终答案",
-                    extra={"event": "react_final", "iteration": iteration},
-                )
-                return response.content or "（模型未返回内容）"
-
-            # 记录助手消息（包含 tool_calls）到上下文
-            cm.add_message(self._assistant_message(response))
-
-            # 依次执行工具调用并追加观察结果到上下文
-            for call in response.tool_calls:
-                self._emit(f"[行动] 调用工具 {call['name']}，参数: {call['arguments']}")
-                observation = self.registry.execute(call["name"], call["arguments"])
-                self._emit(f"[观察] {observation}")
-                cm.add_message(
-                    {
-                        "role": "tool",
-                        "tool_call_id": call["id"],
-                        "content": observation,
-                    }
-                )
-
-        # 达到最大迭代次数仍未结束，进行最后一次无工具的收尾请求
-        self._emit(f"[提示] 已达到最大迭代次数 {self.config.max_iterations}，尝试给出当前结论。")
-        logger.warning(
-            "ReAct 达到最大迭代次数",
-            extra={"event": "react_max_iterations", "max_iterations": self.config.max_iterations},
-        )
-        messages = cm.get_messages()
-        final = self.llm.chat(messages, tools=None)
-        cm.record_llm_usage(final.usage)
-        cm.add_message({"role": "assistant", "content": final.content})
-        return (
-            final.content
-            or f"未能在 {self.config.max_iterations} 轮内完成任务，请尝试拆分任务或增大 max_iterations。"
-        )
 
     @staticmethod
     def _assistant_message(response: Any) -> dict[str, Any]:

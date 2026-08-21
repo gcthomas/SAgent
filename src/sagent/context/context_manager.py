@@ -16,7 +16,7 @@ from __future__ import annotations
 from typing import Any
 
 from ..config.models import ContextConfig
-from ..observability import get_logger
+from ..observability import Span, get_logger
 from .strategies import (
     LLMSummaryCompression,
     SlidingWindowPruning,
@@ -178,84 +178,96 @@ class ContextManager:
 
     def _compress(self) -> None:
         """执行分层压缩，依次应用策略（低成本操作 → 语义保留 → 兜底裁剪），直到 token 降至安全线以下。"""
-        # 压缩会改变消息列表，重置混合校准基准（下次 LLM 调用后重新校准）
-        if self._calibrated_tokens is not None:
-            logger.info(
-                "压缩触发，混合校准基准重置",
-                extra={
-                    "event": "calibration_reset",
-                    "previous_base": self._calibrated_tokens,
-                    "previous_count": self._calibrated_count,
-                },
-            )
-        self._calibrated_tokens = None
-        self._calibrated_count = 0
+        with Span("context.compress") as span:
+            before_tokens = self.token_count
+            span.set_attribute("sagent.compression.before_tokens", before_tokens)
 
-        logger.info(
-            "触发上下文压缩",
-            extra={"event": "context_compress_start", "before_tokens": self.token_count},
-        )
-
-        # 第一层：工具输出截断（add_message 时已内联执行，这里再做一次全量扫描确保覆盖）
-        self._messages = self._truncation.compress(self._messages)
-        if self._is_below_safe():
-            logger.info(
-                "压缩完成（第一层）",
-                extra={"event": "context_compress_done", "layer": 1, "after_tokens": self.token_count},
-            )
-            return
-
-        # 第二层：大体积工具消息卸载
-        self._messages = self._offload.compress(self._messages)
-        if self._is_below_safe():
-            logger.info(
-                "压缩完成（第二层）",
-                extra={"event": "context_compress_done", "layer": 2, "after_tokens": self.token_count},
-            )
-            return
-
-        # 分离旧消息与近期消息
-        system_msgs, body = self._split_system_and_body()
-        keep_count = self._config.keep_recent_messages
-        recent = body[-keep_count:] if len(body) > keep_count else body
-        old = body[:-keep_count] if len(body) > keep_count else []
-
-        if old and self._summarizer is not None:
-            # 第三层：LLM 摘要压缩（先于裁剪执行，保留语义信息）
-            try:
-                summary = self._summarizer.summarize(old, self._existing_summary)
-                self._existing_summary = summary
-                # 通知压缩摘要事件（供 SessionManager 记录 compaction 事件）
-                if self._on_compaction is not None and old:
-                    covered_from_seq = old[0].get("seq", 0)
-                    covered_to_seq = old[-1].get("seq", 0)
-                    try:
-                        self._on_compaction(summary, covered_from_seq, covered_to_seq)
-                    except Exception:
-                        logger.exception(
-                            "压缩摘要事件回调执行失败",
-                            extra={"event": "compaction_callback_error"},
-                        )
-                summary_msg = {"role": "system", "content": f"[历史摘要] {summary}"}
-                self._messages = system_msgs + [summary_msg] + recent
+            # 压缩会改变消息列表，重置混合校准基准（下次 LLM 调用后重新校准）
+            if self._calibrated_tokens is not None:
                 logger.info(
-                    "压缩完成（第三层摘要）",
-                    extra={"event": "context_compress_done", "layer": 3, "after_tokens": self.token_count},
+                    "压缩触发，混合校准基准重置",
+                    extra={
+                        "event": "calibration_reset",
+                        "previous_base": self._calibrated_tokens,
+                        "previous_count": self._calibrated_count,
+                    },
                 )
-                if self._is_below_safe():
-                    return
-            except Exception:
-                logger.exception(
-                    "LLM 摘要压缩失败",
-                    extra={"event": "context_summary_error"},
-                )
+            self._calibrated_tokens = None
+            self._calibrated_count = 0
 
-        # 第四层：滑动窗口裁剪（兜底）
-        self._messages = self._pruning.compress(self._messages)
-        logger.info(
-            "压缩完成（第四层）",
-            extra={"event": "context_compress_done", "layer": 4, "after_tokens": self.token_count},
-        )
+            logger.info(
+                "触发上下文压缩",
+                extra={"event": "context_compress_start", "before_tokens": before_tokens},
+            )
+
+            # 第一层：工具输出截断（add_message 时已内联执行，这里再做一次全量扫描确保覆盖）
+            self._messages = self._truncation.compress(self._messages)
+            if self._is_below_safe():
+                logger.info(
+                    "压缩完成（第一层）",
+                    extra={"event": "context_compress_done", "layer": 1, "after_tokens": self.token_count},
+                )
+                span.set_attribute("sagent.compression.layer", 1)
+                span.set_attribute("sagent.compression.after_tokens", self.token_count)
+                return
+
+            # 第二层：大体积工具消息卸载
+            self._messages = self._offload.compress(self._messages)
+            if self._is_below_safe():
+                logger.info(
+                    "压缩完成（第二层）",
+                    extra={"event": "context_compress_done", "layer": 2, "after_tokens": self.token_count},
+                )
+                span.set_attribute("sagent.compression.layer", 2)
+                span.set_attribute("sagent.compression.after_tokens", self.token_count)
+                return
+
+            # 分离旧消息与近期消息
+            system_msgs, body = self._split_system_and_body()
+            keep_count = self._config.keep_recent_messages
+            recent = body[-keep_count:] if len(body) > keep_count else body
+            old = body[:-keep_count] if len(body) > keep_count else []
+
+            if old and self._summarizer is not None:
+                # 第三层：LLM 摘要压缩（先于裁剪执行，保留语义信息）
+                try:
+                    summary = self._summarizer.summarize(old, self._existing_summary)
+                    self._existing_summary = summary
+                    # 通知压缩摘要事件（供 SessionManager 记录 compaction 事件）
+                    if self._on_compaction is not None and old:
+                        covered_from_seq = old[0].get("seq", 0)
+                        covered_to_seq = old[-1].get("seq", 0)
+                        try:
+                            self._on_compaction(summary, covered_from_seq, covered_to_seq)
+                        except Exception:
+                            logger.exception(
+                                "压缩摘要事件回调执行失败",
+                                extra={"event": "compaction_callback_error"},
+                            )
+                    summary_msg = {"role": "system", "content": f"[历史摘要] {summary}"}
+                    self._messages = system_msgs + [summary_msg] + recent
+                    logger.info(
+                        "压缩完成（第三层摘要）",
+                        extra={"event": "context_compress_done", "layer": 3, "after_tokens": self.token_count},
+                    )
+                    if self._is_below_safe():
+                        span.set_attribute("sagent.compression.layer", 3)
+                        span.set_attribute("sagent.compression.after_tokens", self.token_count)
+                        return
+                except Exception:
+                    logger.exception(
+                        "LLM 摘要压缩失败",
+                        extra={"event": "context_summary_error"},
+                    )
+
+            # 第四层：滑动窗口裁剪（兜底）
+            self._messages = self._pruning.compress(self._messages)
+            logger.info(
+                "压缩完成（第四层）",
+                extra={"event": "context_compress_done", "layer": 4, "after_tokens": self.token_count},
+            )
+            span.set_attribute("sagent.compression.layer", 4)
+            span.set_attribute("sagent.compression.after_tokens", self.token_count)
 
     def _split_system_and_body(
         self,

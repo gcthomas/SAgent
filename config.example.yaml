@@ -146,3 +146,46 @@ mcp:
     #   transport: "stdio"
     #   command: "some-command"
     #   enabled: false
+
+# 可观测性配置（可选，缺省时使用默认值）
+# 启用后提供 Span 树追踪、指标聚合、脱敏和本地 JSON Lines 导出
+# 默认本地观测不依赖 OpenTelemetry 包；仅当 otlp_enabled 为 true 时需要安装可选依赖
+observability:
+  # 是否启用增强观测（关闭时仅保留现有 trace_id 日志）
+  enabled: true
+  # 本地 Trace 文件目录（相对运行目录）
+  trace_dir: "logs"
+  # 本地 Trace 文件名（按天滚动，JSON Lines 格式）
+  trace_file: "sagent_trace.jsonl"
+  # 本地 Metric 文件名（按天滚动，JSON Lines 格式）
+  metric_file: "sagent_metrics.jsonl"
+  # 是否采集 LLM 诊断内容（prompt/completion 等）
+  # 最终有效值需同时满足此开关与 logging.log_llm_content，且始终经过脱敏器
+  capture_content: false
+  # 采集内容的最大字符长度（超过则截断）
+  content_max_length: 500
+  # 模型价格表（可选，用于估算成本）
+  # 格式：模型名 -> {input_price_per_million: 输入价格, output_price_per_million: 输出价格}（单位：元/百万 token）
+  # 缺少价格的模型不计算成本，标记为不可用
+  model_pricing: {}
+  # 示例：
+  # model_pricing:
+  #   "gpt-4o-mini":
+  #     input_price_per_million: 1.0
+  #     output_price_per_million: 4.0
+  #   "deepseek-chat":
+  #     input_price_per_million: 1.0
+  #     output_price_per_million: 2.0
+  # 是否启用 OTLP 导出（需要安装可选依赖 opentelemetry-api、opentelemetry-sdk、opentelemetry-exporter-otlp-proto-http）
+  otlp_enabled: false
+  # OTLP endpoint 地址
+  otlp_endpoint: "http://localhost:4318"
+  # OTLP 协议：http 或 grpc
+  otlp_protocol: "http"
+  # OTLP 导出超时（秒）
+  otlp_timeout: 10
+  # 指标刷新周期（秒），控制本地 Metric 快照写入频率
+  metrics_flush_interval: 60
+  # 是否启用 OpenAI SDK 自动埋点（实验性，默认关闭）
+  # 首期禁止与手动 gen_ai.chat Span 同时启用，配置为 true 时仅记录警告日志
+  enable_openai_auto_instrumentation: false

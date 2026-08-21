@@ -11,7 +11,7 @@ from typing import Any, Callable
 from ..config.models import AgentConfig
 from ..context.context_manager import ContextManager
 from ..llm.client import LLMClient
-from ..observability import get_logger
+from ..observability import Span, get_logger
 from ..tools.registry import ToolRegistry
 from .prompts import PLAN_DECOMPOSE_PROMPT, PLAN_SUMMARY_PROMPT, REACT_SYSTEM_PROMPT
 from .react_engine import ReActEngine
@@ -35,6 +35,7 @@ class PlanEngine:
         self.config = agent_config
         self._on_event = on_event
         self._context_manager = context_manager
+        self._outcome = "completed"
         # 每个步骤复用 ReAct 引擎执行，传入 context_manager 实现上下文持久化
         self._react = ReActEngine(llm, registry, agent_config, on_event, context_manager=context_manager)
 
@@ -58,13 +59,17 @@ class PlanEngine:
             self._context_manager.ensure_system_prompt(prompt)
             self._context_manager.add_message({"role": "user", "content": task})
 
-        steps = self._decompose(task)
+        with Span("plan.decompose") as decompose_span:
+            steps = self._decompose(task)
+
         if not steps:
             # 拆解失败时回退为直接用 ReAct 执行整个任务
             self._emit("[提示] 未能拆解出步骤，直接执行整个任务。")
             logger.warning("Plan 拆解失败，回退 ReAct", extra={"event": "plan_fallback"})
+            self._outcome = "plan_fallback"
             return self._react.run(task, memory_prefix=memory_prefix)
 
+        decompose_span.set_attribute("sagent.step_count", len(steps))
         self._emit(f"[计划] 共拆解为 {len(steps)} 个步骤：")
         logger.info(
             "Plan 拆解完成",
@@ -75,22 +80,26 @@ class PlanEngine:
 
         step_results: list[str] = []
         for idx, step in enumerate(steps, start=1):
-            self._emit(f"\n[执行步骤 {idx}/{len(steps)}] {step}")
-            logger.info(
-                "Plan 执行步骤",
-                extra={"event": "plan_step", "index": idx, "total": len(steps), "step": step},
-            )
-            # 为每个步骤提供原始任务作为背景
-            step_task = (
-                f"原始任务: {task}\n"
-                f"当前需要完成的步骤: {step}\n"
-                f"请完成该步骤并给出结果。"
-            )
-            result = self._react.run(step_task, memory_prefix=memory_prefix)
-            step_results.append(f"步骤 {idx}（{step}）结果:\n{result}")
+            with Span("plan.step") as step_span:
+                step_span.set_attribute("sagent.step_index", idx)
+                step_span.set_attribute("sagent.step_total", len(steps))
+                self._emit(f"\n[执行步骤 {idx}/{len(steps)}] {step}")
+                logger.info(
+                    "Plan 执行步骤",
+                    extra={"event": "plan_step", "index": idx, "total": len(steps), "step": step},
+                )
+                # 为每个步骤提供原始任务作为背景
+                step_task = (
+                    f"原始任务: {task}\n"
+                    f"当前需要完成的步骤: {step}\n"
+                    f"请完成该步骤并给出结果。"
+                )
+                result = self._react.run(step_task, memory_prefix=memory_prefix)
+                step_results.append(f"步骤 {idx}（{step}）结果:\n{result}")
 
         logger.info("Plan 汇总结果", extra={"event": "plan_summarize"})
-        summary = self._summarize(task, step_results)
+        with Span("plan.summarize"):
+            summary = self._summarize(task, step_results)
 
         # 汇总完成后，将最终结果添加到上下文作为 assistant 消息
         if self._context_manager is not None:

@@ -16,7 +16,7 @@ import time
 from typing import Any
 
 from ...config.models import MCPServerConfig
-from ...observability import get_logger
+from ...observability import Span, get_logger
 
 logger = get_logger(__name__)
 
@@ -124,29 +124,36 @@ class MCPSessionManager:
         返回:
             MCP Tool 对象列表（连接失败时为空列表）
         """
-        logger.info(
-            "MCP 服务器连接",
-            extra={"event": "mcp_connect_start", "server": config.name, "transport": config.transport},
-        )
-        try:
-            tools = self._submit("connect", config, config.connect_timeout)
+        with Span("mcp.connect") as span:
+            span.set_attribute("mcp.server.name", config.name)
+            span.set_attribute("mcp.transport", config.transport)
             logger.info(
-                "MCP 服务器连接完成",
-                extra={"event": "mcp_connect_done", "server": config.name, "tool_count": len(tools)},
+                "MCP 服务器连接",
+                extra={"event": "mcp_connect_start", "server": config.name, "transport": config.transport},
             )
-            return tools
-        except TimeoutError:
-            logger.error(
-                "MCP 服务器连接超时",
-                extra={"event": "mcp_connect_error", "server": config.name, "error": "timeout"},
-            )
-            return []
-        except Exception as exc:
-            logger.error(
-                "MCP 服务器连接失败",
-                extra={"event": "mcp_connect_error", "server": config.name, "error": str(exc)},
-            )
-            return []
+            try:
+                tools = self._submit("connect", config, config.connect_timeout)
+                logger.info(
+                    "MCP 服务器连接完成",
+                    extra={"event": "mcp_connect_done", "server": config.name, "tool_count": len(tools)},
+                )
+                return tools
+            except TimeoutError:
+                span.set_attribute("error.type", "timeout")
+                span.set_status("error")
+                logger.error(
+                    "MCP 服务器连接超时",
+                    extra={"event": "mcp_connect_error", "server": config.name, "error": "timeout"},
+                )
+                return []
+            except Exception as exc:
+                span.set_attribute("error.type", type(exc).__name__)
+                span.set_status("error")
+                logger.error(
+                    "MCP 服务器连接失败",
+                    extra={"event": "mcp_connect_error", "server": config.name, "error": str(exc)},
+                )
+                return []
 
     async def _connect(self, config: MCPServerConfig) -> list:
         """异步连接 MCP 服务器。
@@ -232,35 +239,44 @@ class MCPSessionManager:
         返回:
             工具执行结果字符串；错误时返回以"错误:"开头的字符串
         """
-        logger.info(
-            "MCP 工具调用",
-            extra={
-                "event": "mcp_tool_call",
-                "server": server_name,
-                "tool": tool_name,
-                "tool_args": arguments,
-            },
-        )
-        timeout = self._call_timeouts.get(server_name, 60.0)
-        start = time.perf_counter()
-        try:
-            result = self._submit("call", (server_name, tool_name, arguments), timeout)
-            latency_ms = round((time.perf_counter() - start) * 1000, 1)
+        with Span("mcp.tool_call") as span:
+            span.set_attribute("mcp.server.name", server_name)
+            span.set_attribute("mcp.tool.name", tool_name)
             logger.info(
-                "MCP 工具调用完成",
+                "MCP 工具调用",
                 extra={
-                    "event": "mcp_tool_result",
+                    "event": "mcp_tool_call",
                     "server": server_name,
                     "tool": tool_name,
-                    "result_length": len(result),
-                    "latency_ms": latency_ms,
+                    "tool_args": arguments,
                 },
             )
-            return result
-        except TimeoutError:
-            return f"错误: MCP 工具 '{server_name}.{tool_name}' 调用超时"
-        except Exception as exc:
-            return f"错误: MCP 工具 '{server_name}.{tool_name}' 调用失败: {exc}"
+            timeout = self._call_timeouts.get(server_name, 60.0)
+            start = time.perf_counter()
+            try:
+                result = self._submit("call", (server_name, tool_name, arguments), timeout)
+                latency_ms = round((time.perf_counter() - start) * 1000, 1)
+                span.set_attribute("mcp.latency_ms", latency_ms)
+                span.set_attribute("mcp.result_length", len(result))
+                logger.info(
+                    "MCP 工具调用完成",
+                    extra={
+                        "event": "mcp_tool_result",
+                        "server": server_name,
+                        "tool": tool_name,
+                        "result_length": len(result),
+                        "latency_ms": latency_ms,
+                    },
+                )
+                return result
+            except TimeoutError:
+                span.set_attribute("error.type", "timeout")
+                span.set_status("error")
+                return f"错误: MCP 工具 '{server_name}.{tool_name}' 调用超时"
+            except Exception as exc:
+                span.set_attribute("error.type", type(exc).__name__)
+                span.set_status("error")
+                return f"错误: MCP 工具 '{server_name}.{tool_name}' 调用失败: {exc}"
 
     async def _call_tool(self, server_name: str, tool_name: str, arguments: dict[str, Any]) -> str:
         """异步调用 MCP 工具并提取文本结果。"""

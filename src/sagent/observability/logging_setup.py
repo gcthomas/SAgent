@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from ..config.models import LoggingConfig
+from .redactor import redact
 
 # 当前请求的 trace_id（跨函数调用共享）
 _trace_id_var: ContextVar[str] = ContextVar("trace_id", default="-")
@@ -32,7 +33,7 @@ _log_llm_content = False
 # logging.LogRecord 的内置属性名集合，用于从 record 中筛出自定义 extra 字段
 _RESERVED_ATTRS = set(
     logging.makeLogRecord({}).__dict__.keys()
-) | {"message", "asctime", "trace_id"}
+) | {"message", "asctime", "trace_id", "span_id", "parent_span_id"}
 
 
 def new_trace_id() -> str:
@@ -63,15 +64,26 @@ def get_logger(name: str) -> logging.Logger:
 
 
 class _TraceIdFilter(logging.Filter):
-    """将当前上下文的 trace_id 注入到每条日志记录。"""
+    """将当前上下文的 trace_id、span_id、parent_span_id 注入到每条日志记录。"""
 
     def filter(self, record: logging.LogRecord) -> bool:
-        record.trace_id = current_trace_id()
+        # 延迟导入避免与 context 模块的循环依赖
+        from .context import current_span_context
+
+        ctx = current_span_context()
+        if ctx is not None:
+            record.trace_id = ctx.trace_id
+            record.span_id = ctx.span_id
+            record.parent_span_id = ctx.parent_span_id
+        else:
+            record.trace_id = current_trace_id()
+            record.span_id = "-"
+            record.parent_span_id = "-"
         return True
 
 
 class _JsonFormatter(logging.Formatter):
-    """将日志记录格式化为单行 JSON。"""
+    """将日志记录格式化为单行 JSON，所有字段经脱敏器处理。"""
 
     def format(self, record: logging.LogRecord) -> str:
         data: dict[str, Any] = {
@@ -80,18 +92,20 @@ class _JsonFormatter(logging.Formatter):
             ).astimezone().isoformat(timespec="milliseconds"),
             "level": record.levelname,
             "trace_id": getattr(record, "trace_id", "-"),
+            "span_id": getattr(record, "span_id", "-"),
+            "parent_span_id": getattr(record, "parent_span_id", "-"),
             "logger": record.name,
-            "msg": record.getMessage(),
+            "msg": redact(record.getMessage()),
         }
 
-        # 附加通过 extra 传入的自定义字段
+        # 附加通过 extra 传入的自定义字段（脱敏后）
         for key, value in record.__dict__.items():
             if key not in _RESERVED_ATTRS and not key.startswith("_"):
-                data[key] = _safe(value)
+                data[key] = _safe(redact(value))
 
-        # 异常堆栈
+        # 异常堆栈（脱敏后）
         if record.exc_info:
-            data["exc"] = self.formatException(record.exc_info)
+            data["exc"] = redact(self.formatException(record.exc_info))
 
         return json.dumps(data, ensure_ascii=False)
 

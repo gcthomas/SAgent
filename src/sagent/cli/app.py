@@ -16,7 +16,7 @@ from ..core.plan_engine import PlanEngine
 from ..core.react_engine import ReActEngine
 from ..llm.client import LLMClient
 from ..memory import MemoryManager, MemoryStore
-from ..observability import get_logger, new_trace_id, setup_logging
+from ..observability import Span, close_observability, flush_metrics, get_logger, setup_content_capture, setup_logging, setup_observability
 from ..session.manager import SessionManager
 from ..session.store import SessionStore
 from ..tools import AddMemoryTool, RemoveMemoryTool, ReplaceMemoryTool, build_default_registry
@@ -175,6 +175,8 @@ def run() -> int:
 
     # 初始化日志系统
     setup_logging(config.logging)
+    setup_observability(config.observability)
+    setup_content_capture(config.observability, config.logging.log_llm_content)
     logger.info(
         "SAgent 启动",
         extra={"event": "startup", "model": config.llm.model},
@@ -266,6 +268,8 @@ def run() -> int:
                     logger.exception("退出前会话保存失败", extra={"event": "session_save_error"})
             if mcp_session_manager is not None:
                 mcp_session_manager.shutdown()
+            flush_metrics()
+            close_observability()
             print("\n再见。")
             return 0
 
@@ -279,6 +283,8 @@ def run() -> int:
                     logger.exception("退出前会话保存失败", extra={"event": "session_save_error"})
             if mcp_session_manager is not None:
                 mcp_session_manager.shutdown()
+            flush_metrics()
+            close_observability()
             print("再见。")
             logger.info("用户退出", extra={"event": "exit"})
             return 0
@@ -289,36 +295,50 @@ def run() -> int:
             _dispatch_session_command(parsed, session_manager)
             continue
 
-        # 为本次问答生成 trace_id，串联整条链路
-        new_trace_id()
-        logger.info(
-            "收到用户输入",
-            extra={"event": "user_input", "input": user_input, "mode": mode},
-        )
-
         # 延迟创建会话：首次真正对话时按需创建，避免启动即产生空会话。
         # 若用户已通过 /new 或 /switch 显式创建/切换会话，则 get_current_session() 返回非 None，不会重复创建。
         if session_manager is not None and session_manager.get_current_session() is None:
             session_manager.ensure_current_session()
 
-        try:
-            answer = engine.run(user_input, memory_prefix=memory_prefix)
-        except Exception as exc:  # 捕获运行期异常，避免整个 CLI 崩溃
-            print(f"执行出错: {exc}", file=sys.stderr)
-            logger.exception("执行出错", extra={"event": "run_error"})
-            # 异常时也尝试保存已有消息
-            if session_manager is not None and config.session.auto_save:
-                try:
-                    session_manager.save_current()
-                except Exception:
-                    logger.exception("会话自动保存失败", extra={"event": "session_save_error"})
-            continue
+        # 获取当前 session_id（仅在会话上下文可用时）
+        session_id = None
+        if session_manager is not None:
+            cur = session_manager.get_current_session()
+            if cur is not None:
+                session_id = cur.id
 
-        logger.info(
-            "生成最终回复",
-            extra={"event": "final_answer", "answer_length": len(answer)},
-        )
-        print(f"\n助手 > {answer}")
+        with Span("agent.run", session_id=session_id) as span:
+            span.set_attribute("sagent.mode", mode)
+            logger.info(
+                "收到用户输入",
+                extra={"event": "user_input", "mode": mode},
+            )
+
+            try:
+                answer = engine.run(user_input, memory_prefix=memory_prefix)
+            except Exception as exc:  # 捕获运行期异常，避免整个 CLI 崩溃
+                span.set_attribute("sagent.outcome", "failed")
+                span.set_status("error")
+                print(f"执行出错: {exc}", file=sys.stderr)
+                logger.exception("执行出错", extra={"event": "run_error"})
+                # 异常时也尝试保存已有消息
+                if session_manager is not None and config.session.auto_save:
+                    try:
+                        session_manager.save_current()
+                    except Exception:
+                        logger.exception("会话自动保存失败", extra={"event": "session_save_error"})
+                continue
+
+            outcome = "completed"
+            if not answer:
+                outcome = "empty_answer"
+            span.set_attribute("sagent.outcome", outcome)
+            span.set_attribute("sagent.answer_length", len(answer))
+            logger.info(
+                "生成最终回复",
+                extra={"event": "final_answer", "answer_length": len(answer)},
+            )
+            print(f"\n助手 > {answer}")
 
         # 每轮问答后增量保存会话消息
         if session_manager is not None and config.session.auto_save:

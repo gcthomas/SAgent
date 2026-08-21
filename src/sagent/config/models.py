@@ -180,6 +180,40 @@ class MCPConfig(BaseModel):
     servers: list[MCPServerConfig] = Field(default_factory=list, description="MCP 服务器配置列表")
 
 
+class ObservabilityConfig(BaseModel):
+    """可观测性配置。
+
+    控制 Span 树、指标聚合、脱敏、本地导出与可选 OTLP 导出。
+    默认本地观测不依赖 OpenTelemetry 包。
+    """
+    # 是否启用增强观测（关闭时仅保留现有 trace_id 日志）
+    enabled: bool = Field(default=True, description="是否启用增强观测")
+    # 本地 Trace 文件目录（相对运行目录）
+    trace_dir: str = Field(default="logs", description="本地 Trace 文件目录")
+    # 本地 Trace 文件名（按天滚动）
+    trace_file: str = Field(default="sagent_trace.jsonl", description="本地 Trace 文件名")
+    # 本地 Metric 文件名（按天滚动）
+    metric_file: str = Field(default="sagent_metrics.jsonl", description="本地 Metric 文件名")
+    # 是否采集 LLM 内容（prompt/completion 等），最终有效值需同时满足此开关与 logging.log_llm_content
+    capture_content: bool = Field(default=False, description="是否采集 LLM 诊断内容")
+    # 采集内容的最大字符长度（超过则截断）
+    content_max_length: int = Field(default=500, description="采集内容的最大字符长度")
+    # 模型价格表：模型名 -> {input_price_per_million, output_price_per_million}（单位：元/百万 token）
+    model_pricing: dict[str, dict[str, float]] = Field(default_factory=dict, description="模型价格表")
+    # 是否启用 OTLP 导出
+    otlp_enabled: bool = Field(default=False, description="是否启用 OTLP 导出")
+    # OTLP endpoint 地址
+    otlp_endpoint: str = Field(default="http://localhost:4318", description="OTLP endpoint 地址")
+    # OTLP 协议
+    otlp_protocol: Literal["http", "grpc"] = Field(default="http", description="OTLP 协议")
+    # OTLP 导出超时（秒）
+    otlp_timeout: float = Field(default=10.0, description="OTLP 导出超时（秒）")
+    # 指标刷新周期（秒），控制本地 Metric 快照写入频率
+    metrics_flush_interval: float = Field(default=60.0, description="指标刷新周期（秒）")
+    # 是否启用 OpenAI SDK 自动埋点（实验性，默认关闭，首期禁止与手动 gen_ai.chat Span 同时启用）
+    enable_openai_auto_instrumentation: bool = Field(default=False, description="是否启用 OpenAI SDK 自动埋点（实验性，默认关闭）")
+
+
 class AppConfig(BaseModel):
     """应用总配置。"""
 
@@ -190,3 +224,4 @@ class AppConfig(BaseModel):
     session: SessionConfig = Field(default_factory=SessionConfig, description="会话管理配置")
     memory: MemoryConfig = Field(default_factory=MemoryConfig, description="长期记忆配置")
     mcp: MCPConfig = Field(default_factory=MCPConfig, description="MCP 配置")
+    observability: ObservabilityConfig = Field(default_factory=ObservabilityConfig, description="可观测性配置")

@@ -12,7 +12,8 @@ from typing import Any
 from openai import OpenAI
 
 from ..config.models import LLMConfig
-from ..observability import get_logger, log_llm_content_enabled
+from ..observability import Span, get_logger
+from ..observability.content import is_content_capture_enabled, truncate_content
 
 logger = get_logger(__name__)
 
@@ -74,89 +75,114 @@ class LLMClient:
         返回:
             LLMResponse: 统一响应结构。
         """
-        kwargs: dict[str, Any] = {
-            "model": self.config.model,
-            "messages": messages,
-            "temperature": self.config.temperature,
-        }
-        if tools:
-            kwargs["tools"] = tools
-            kwargs["tool_choice"] = "auto"
+        with Span("gen_ai.chat") as span:
+            span.set_attribute("gen_ai.operation.name", "chat")
+            span.set_attribute("gen_ai.provider.name", "openai")
+            span.set_attribute("gen_ai.request.model", self.config.model)
+            span.set_attribute("gen_ai.request.message_count", len(messages))
+            if tools:
+                span.set_attribute("gen_ai.request.tool_count", len(tools))
 
-        # 记录请求：默认仅摘要，开关开启时附完整 messages
-        request_extra: dict[str, Any] = {
-            "event": "llm_request",
-            "model": self.config.model,
-            "message_count": len(messages),
-            "tool_count": len(tools) if tools else 0,
-        }
-        if log_llm_content_enabled():
-            request_extra["messages"] = messages
-        logger.info("发起 LLM 请求", extra=request_extra)
-
-        start = time.perf_counter()
-        try:
-            completion = self._client.chat.completions.create(**kwargs)
-        except Exception:
-            logger.exception(
-                "LLM 请求失败",
-                extra={
-                    "event": "llm_error",
-                    "model": self.config.model,
-                    "latency_ms": round((time.perf_counter() - start) * 1000, 1),
-                },
-            )
-            raise
-        latency_ms = round((time.perf_counter() - start) * 1000, 1)
-        message = completion.choices[0].message
-
-        content = message.content or ""
-
-        tool_calls: list[dict[str, Any]] = []
-        if getattr(message, "tool_calls", None):
-            for call in message.tool_calls:
-                tool_calls.append(
-                    {
-                        "id": call.id,
-                        "name": call.function.name,
-                        "arguments": call.function.arguments,
-                    }
-                )
-
-        # 记录响应：默认仅摘要，开关开启时附完整内容
-        response_extra: dict[str, Any] = {
-            "event": "llm_response",
-            "model": self.config.model,
-            "latency_ms": latency_ms,
-            "content_length": len(content),
-            "has_tool_calls": len(tool_calls) > 0,
-            "tool_call_count": len(tool_calls),
-        }
-        # 记录 token 用量（并非所有 OpenAI 兼容服务都返回 usage，需容错）
-        usage = getattr(completion, "usage", None)
-        usage_dict: dict[str, int] | None = None
-        if usage is not None:
-            response_extra["input_tokens"] = usage.prompt_tokens
-            response_extra["output_tokens"] = usage.completion_tokens
-            response_extra["total_tokens"] = usage.total_tokens
-            usage_dict = {
-                "prompt_tokens": usage.prompt_tokens,
-                "completion_tokens": usage.completion_tokens,
-                "total_tokens": usage.total_tokens,
+            kwargs: dict[str, Any] = {
+                "model": self.config.model,
+                "messages": messages,
+                "temperature": self.config.temperature,
             }
-            prompt_details = getattr(usage, "prompt_tokens_details", None)
-            if prompt_details is not None:
-                cached = getattr(prompt_details, "cached_tokens", None)
-                if cached is not None:
-                    response_extra["cached_tokens"] = cached
-            completion_details = getattr(usage, "completion_tokens_details", None)
-            if completion_details is not None:
-                reasoning = getattr(completion_details, "reasoning_tokens", None)
-                if reasoning is not None:
-                    response_extra["reasoning_tokens"] = reasoning
-        if log_llm_content_enabled():
-            response_extra["content"] = content
-            response_extra["tool_calls"] = tool_calls
-        logger.info("收到 LLM 响应", extra=response_extra)
+            if tools:
+                kwargs["tools"] = tools
+                kwargs["tool_choice"] = "auto"
 
-        return LLMResponse(content=content, tool_calls=tool_calls, raw_message=message, usage=usage_dict)
+            # 记录请求：默认仅摘要，开关开启时附完整 messages（经截断和脱敏）
+            request_extra: dict[str, Any] = {
+                "event": "llm_request",
+                "model": self.config.model,
+                "message_count": len(messages),
+                "tool_count": len(tools) if tools else 0,
+            }
+            if is_content_capture_enabled():
+                request_extra["messages"] = truncate_content(messages)
+                request_extra["sagent.content.capture"] = True
+            logger.info("发起 LLM 请求", extra=request_extra)
+
+            start = time.perf_counter()
+            try:
+                completion = self._client.chat.completions.create(**kwargs)
+            except Exception:
+                logger.exception(
+                    "LLM 请求失败",
+                    extra={
+                        "event": "llm_error",
+                        "model": self.config.model,
+                        "latency_ms": round((time.perf_counter() - start) * 1000, 1),
+                    },
+                )
+                raise
+            latency_ms = round((time.perf_counter() - start) * 1000, 1)
+            message = completion.choices[0].message
+
+            content = message.content or ""
+
+            tool_calls: list[dict[str, Any]] = []
+            if getattr(message, "tool_calls", None):
+                for call in message.tool_calls:
+                    tool_calls.append(
+                        {
+                            "id": call.id,
+                            "name": call.function.name,
+                            "arguments": call.function.arguments,
+                        }
+                    )
+
+            # 记录响应：默认仅摘要，开关开启时附完整内容
+            response_extra: dict[str, Any] = {
+                "event": "llm_response",
+                "model": self.config.model,
+                "latency_ms": latency_ms,
+                "content_length": len(content),
+                "has_tool_calls": len(tool_calls) > 0,
+                "tool_call_count": len(tool_calls),
+            }
+            # 记录 token 用量（并非所有 OpenAI 兼容服务都返回 usage，需容错）
+            usage = getattr(completion, "usage", None)
+            usage_dict: dict[str, int] | None = None
+            if usage is not None:
+                response_extra["input_tokens"] = usage.prompt_tokens
+                response_extra["output_tokens"] = usage.completion_tokens
+                response_extra["total_tokens"] = usage.total_tokens
+                usage_dict = {
+                    "prompt_tokens": usage.prompt_tokens,
+                    "completion_tokens": usage.completion_tokens,
+                    "total_tokens": usage.total_tokens,
+                }
+                prompt_details = getattr(usage, "prompt_tokens_details", None)
+                if prompt_details is not None:
+                    cached = getattr(prompt_details, "cached_tokens", None)
+                    if cached is not None:
+                        response_extra["cached_tokens"] = cached
+                completion_details = getattr(usage, "completion_tokens_details", None)
+                if completion_details is not None:
+                    reasoning = getattr(completion_details, "reasoning_tokens", None)
+                    if reasoning is not None:
+                        response_extra["reasoning_tokens"] = reasoning
+            if is_content_capture_enabled():
+                response_extra["content"] = truncate_content(content)
+                response_extra["tool_calls"] = truncate_content(tool_calls)
+                response_extra["sagent.content.capture"] = True
+            logger.info("收到 LLM 响应", extra=response_extra)
+
+            # 设置 Span usage 属性（从 response_extra 读取已设置的缓存与 reasoning token）
+            if usage_dict is not None:
+                span.set_attribute("gen_ai.usage.input_tokens", usage_dict["prompt_tokens"])
+                span.set_attribute("gen_ai.usage.output_tokens", usage_dict["completion_tokens"])
+                cached = response_extra.get("cached_tokens")
+                if cached is not None:
+                    span.set_attribute("gen_ai.usage.cache_read.input_tokens", cached)
+                reasoning = response_extra.get("reasoning_tokens")
+                if reasoning is not None:
+                    span.set_attribute("gen_ai.usage.reasoning_tokens", reasoning)
+
+            span.set_attribute("gen_ai.response.latency_ms", latency_ms)
+            span.set_attribute("gen_ai.response.content_length", len(content))
+            span.set_attribute("gen_ai.response.tool_call_count", len(tool_calls))
+
+            return LLMResponse(content=content, tool_calls=tool_calls, raw_message=message, usage=usage_dict)
