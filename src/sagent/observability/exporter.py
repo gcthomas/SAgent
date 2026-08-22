@@ -1,7 +1,9 @@
 """本地 JSON Lines 导出器。
 
-提供按天滚动的 JSON Lines 文件写入器与本地导出器，将 SpanRecord 和
-MetricSnapshot 写入本地文件。导出失败时不影响 Agent 主流程（非阻塞）。
+提供按天滚动的 JSON Lines 文件写入器与实现 OTel SpanExporter 接口的
+LocalSpanExporter，将 SpanData 转换为 SpanRecord 后写入本地文件。
+同时保留 MetricSnapshot 的本地导出能力。
+导出失败时不影响 Agent 主流程（非阻塞）。
 """
 
 from __future__ import annotations
@@ -9,10 +11,16 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
+
+from opentelemetry.sdk.trace.export import SpanExportResult
 
 from ..config.models import ObservabilityConfig
-from .models import MetricSnapshot, SpanRecord
+from .logging_setup import get_logger
+from .models import MetricSnapshot, SpanEvent, SpanRecord
+from .redactor import redact
+
+logger = get_logger(__name__)
 
 
 class _DailyJsonLinesWriter:
@@ -49,7 +57,7 @@ class _DailyJsonLinesWriter:
                 self._file.write(json.dumps(data, ensure_ascii=False) + "\n")
                 self._file.flush()
         except Exception:
-            pass  # 非阻塞
+            logger.debug("JSON Lines 写入失败", exc_info=True)
 
     def close(self) -> None:
         """关闭文件。"""
@@ -58,10 +66,100 @@ class _DailyJsonLinesWriter:
             self._file = None
 
 
-class LocalExporter:
-    """本地 JSON Lines 导出器。
+def _ns_to_iso(ns: int | datetime | None) -> str:
+    """将纳秒时间戳或 datetime 转换为 ISO 格式字符串。"""
+    if ns is None:
+        return ""
+    try:
+        if isinstance(ns, datetime):
+            return ns.isoformat()
+        dt = datetime.fromtimestamp(ns / 1e9, tz=timezone.utc)
+        return dt.isoformat()
+    except (ValueError, TypeError, OSError):
+        return ""
 
-    将 SpanRecord 和 MetricSnapshot 写入按天滚动的 JSON Lines 文件。
+
+def _otel_status_to_str(status: Any) -> str:
+    """将 OTel Status 对象映射为本地状态字符串。"""
+    if status is None:
+        return "ok"
+    try:
+        from opentelemetry.trace import StatusCode
+        if hasattr(status, "status_code") and status.status_code == StatusCode.ERROR:
+            return "error"
+    except Exception:
+        logger.debug("OTel Status 映射失败", exc_info=True)
+    return "ok"
+
+
+def _span_data_to_record(span: Any) -> SpanRecord:
+    """将 OTel SpanData（ReadableSpan）转换为 SpanRecord。
+
+    参数:
+        span: OTel ReadableSpan 对象。
+
+    返回:
+        转换后的 SpanRecord，属性和事件经脱敏处理。
+    """
+    span_context = span.get_span_context()
+    trace_id = format(span_context.trace_id, "032x")
+    span_id = format(span_context.span_id, "016x")
+
+    # parent_span_id：parent 为 None 或无效时返回 "-"
+    parent_span_id = "-"
+    parent = getattr(span, "parent", None)
+    if parent is not None:
+        try:
+            parent_span_id = format(parent.span_id, "016x")
+        except (AttributeError, ValueError):
+            parent_span_id = "-"
+
+    # 时间转换
+    start_time = _ns_to_iso(span.start_time)
+    end_time = _ns_to_iso(span.end_time)
+
+    # 状态
+    status = _otel_status_to_str(span.status)
+
+    # 属性（脱敏）
+    raw_attrs = dict(span.attributes) if span.attributes else {}
+    attributes = redact(raw_attrs)
+
+    # 事件（脱敏）
+    events: list[SpanEvent] = []
+    if span.events:
+        for evt in span.events:
+            evt_attrs = redact(dict(evt.attributes)) if evt.attributes else {}
+            events.append(
+                SpanEvent(
+                    name=evt.name,
+                    timestamp=_ns_to_iso(evt.timestamp),
+                    attributes=evt_attrs,
+                )
+            )
+
+    # session_id 从属性中提取（如果有）
+    session_id = attributes.get("sagent.session_id") if isinstance(attributes, dict) else None
+
+    return SpanRecord(
+        trace_id=trace_id,
+        span_id=span_id,
+        parent_span_id=parent_span_id,
+        name=span.name,
+        start_time=start_time,
+        end_time=end_time,
+        status=status,
+        attributes=attributes,
+        events=events,
+        session_id=session_id,
+    )
+
+
+class LocalSpanExporter:
+    """本地 JSON Lines Span 导出器。
+
+    实现 OTel SpanExporter 接口，将 SpanData 转换为 SpanRecord
+    并写入按天滚动的 JSON Lines 文件。
     导出失败时不影响 Agent 主流程。
     """
 
@@ -77,11 +175,25 @@ class LocalExporter:
             self._trace_writer = _DailyJsonLinesWriter(trace_dir, config.trace_file)
             self._metric_writer = _DailyJsonLinesWriter(trace_dir, config.metric_file)
 
-    def export_span(self, record: SpanRecord) -> None:
-        """导出 Span 记录到本地 JSON Lines 文件。"""
+    def export(self, spans: Sequence[Any]) -> SpanExportResult:
+        """导出一批 Span 到本地 JSON Lines 文件。
+
+        参数:
+            spans: OTel SpanData 序列。
+
+        返回:
+            SpanExportResult.SUCCESS。
+        """
         if not self._enabled or self._trace_writer is None:
-            return
-        self._trace_writer.write(record.model_dump())
+            return SpanExportResult.SUCCESS
+        for span in spans:
+            try:
+                record = _span_data_to_record(span)
+                self._trace_writer.write(record.model_dump())
+            except Exception:
+                # 单条 Span 导出失败不影响其他 Span
+                pass
+        return SpanExportResult.SUCCESS
 
     def export_metric(self, snapshot: MetricSnapshot) -> None:
         """导出指标快照到本地 JSON Lines 文件。
@@ -95,9 +207,13 @@ class LocalExporter:
         self._last_metric_data = snapshot.metrics
         self._metric_writer.write(snapshot.model_dump())
 
-    def close(self) -> None:
+    def shutdown(self) -> None:
         """关闭写入器。"""
         if self._trace_writer is not None:
             self._trace_writer.close()
         if self._metric_writer is not None:
             self._metric_writer.close()
+
+    def force_flush(self, timeout_millis: int = 30000) -> bool:
+        """强制 flush（文件写入已即时 flush，无需额外操作）。"""
+        return True

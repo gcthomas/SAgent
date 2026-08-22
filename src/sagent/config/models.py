@@ -184,7 +184,7 @@ class ObservabilityConfig(BaseModel):
     """可观测性配置。
 
     控制 Span 树、指标聚合、脱敏、本地导出与可选 OTLP 导出。
-    默认本地观测不依赖 OpenTelemetry 包。
+    基于 OpenTelemetry SDK 引擎，安装 requirements.txt 即包含全部依赖。
     """
     # 是否启用增强观测（关闭时仅保留现有 trace_id 日志）
     enabled: bool = Field(default=True, description="是否启用增强观测")
@@ -200,8 +200,8 @@ class ObservabilityConfig(BaseModel):
     content_max_length: int = Field(default=500, description="采集内容的最大字符长度")
     # 模型价格表：模型名 -> {input_price_per_million, output_price_per_million}（单位：元/百万 token）
     model_pricing: dict[str, dict[str, float]] = Field(default_factory=dict, description="模型价格表")
-    # 是否启用 OTLP 导出
-    otlp_enabled: bool = Field(default=False, description="是否启用 OTLP 导出")
+    # 是否启用 OTLP 导出（控制 OTLP 导出器是否加入 provider 链）
+    otlp_enabled: bool = Field(default=False, description="控制 OTLP 导出器是否加入 provider 链")
     # OTLP endpoint 地址
     otlp_endpoint: str = Field(default="http://localhost:4318", description="OTLP endpoint 地址")
     # OTLP 协议

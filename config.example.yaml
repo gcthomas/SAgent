@@ -176,7 +176,7 @@ observability:
   #   "deepseek-chat":
   #     input_price_per_million: 1.0
   #     output_price_per_million: 2.0
-  # 是否启用 OTLP 导出（需要安装可选依赖 opentelemetry-api、opentelemetry-sdk、opentelemetry-exporter-otlp-proto-http）
+  # 是否启用 OTLP 导出（控制 OTLP 导出器是否加入 provider 链；OTel SDK 为必选依赖，无需额外安装）
   otlp_enabled: false
   # OTLP endpoint 地址
   otlp_endpoint: "http://localhost:4318"

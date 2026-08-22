@@ -8,16 +8,14 @@ from .content import (
 )
 from .context import (
     Span,
-    SpanContext,
     close_observability,
     current_parent_span_id,
-    current_span_context,
     current_span_id,
     flush_metrics,
     setup_observability,
 )
 from .cost import calculate_cost, setup_cost_estimator
-from .exporter import LocalExporter
+from .exporter import LocalSpanExporter
 from .logging_setup import (
     current_trace_id,
     get_logger,
@@ -28,6 +26,7 @@ from .logging_setup import (
 )
 from .metrics import (
     MetricsRegistry,
+    MetricsSpanProcessor,
     get_metrics,
     record_span_metrics,
     setup_metrics,
@@ -39,7 +38,6 @@ from .models import (
     SpanRecord,
     SpanStatus,
 )
-from .otlp import OTLPExporter
 from .redactor import redact
 
 __all__ = [
@@ -52,25 +50,22 @@ __all__ = [
     "log_llm_content_enabled",
     # context
     "Span",
-    "SpanContext",
-    "current_span_context",
     "current_span_id",
     "current_parent_span_id",
     "setup_observability",
     "flush_metrics",
     "close_observability",
     # exporter
-    "LocalExporter",
+    "LocalSpanExporter",
     # cost
     "calculate_cost",
     "setup_cost_estimator",
     # metrics
     "MetricsRegistry",
+    "MetricsSpanProcessor",
     "get_metrics",
     "record_span_metrics",
     "setup_metrics",
-    # otlp
-    "OTLPExporter",
     # models
     "ALLOWED_METRIC_LABELS",
     "MetricSnapshot",

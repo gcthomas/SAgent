@@ -1,28 +1,28 @@
 """可观测性模块单元测试。
 
 覆盖配置模型、Span 上下文管理、指标聚合、成本估算、本地导出、
-OTLP 降级与 record_span_metrics 分发逻辑，不依赖真实 LLM。
+OTel SDK 集成（SpanExporter/SpanProcessor）与 record_span_metrics 分发逻辑，不依赖真实 LLM。
 """
 
 from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
+from typing import Any, Sequence
 
 import pytest
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor, SpanExportResult
 
 from sagent.config.models import AppConfig, LLMConfig, ObservabilityConfig
 from sagent.observability import (
     ALLOWED_METRIC_LABELS,
-    LocalExporter,
+    LocalSpanExporter,
     MetricSnapshot,
-    OTLPExporter,
     Span,
     SpanRecord,
     calculate_cost,
     close_observability,
     current_parent_span_id,
-    current_span_context,
     current_span_id,
     get_metrics,
     MetricsRegistry,
@@ -34,8 +34,69 @@ from sagent.observability import (
 from sagent.observability import content as content_module
 from sagent.observability import context as obs_context
 from sagent.observability import cost as cost_module
+from sagent.observability.exporter import _span_data_to_record
 from sagent.observability import metrics as metrics_module
-from sagent.observability.otlp import is_otlp_available
+
+
+# ---------- 测试辅助类 ----------
+
+
+class _CapturingExporter:
+    """测试用 SpanExporter，捕获 SpanRecord 而不写文件。"""
+
+    def __init__(self) -> None:
+        self.captured: list[SpanRecord] = []
+
+    def export(self, spans: Sequence[Any]) -> SpanExportResult:
+        for span in spans:
+            try:
+                record = _span_data_to_record(span)
+                self.captured.append(record)
+            except Exception:
+                pass
+        return SpanExportResult.SUCCESS
+
+    def shutdown(self) -> None:
+        pass
+
+    def force_flush(self, timeout_millis: int = 30000) -> bool:
+        return True
+
+
+class _MockSpanData:
+    """模拟 OTel SpanData 用于测试 LocalSpanExporter。"""
+
+    def __init__(
+        self,
+        name: str = "test",
+        trace_id: int = 1,
+        span_id: int = 1,
+        parent: Any = None,
+        attributes: dict[str, Any] | None = None,
+    ) -> None:
+        self.name = name
+        self._trace_id = trace_id
+        self._span_id = span_id
+        self.parent = parent
+        start_ns = int(datetime(2025, 1, 1, tzinfo=timezone.utc).timestamp() * 1e9)
+        end_ns = int(datetime(2025, 1, 1, 0, 0, 1, tzinfo=timezone.utc).timestamp() * 1e9)
+        self.start_time = start_ns
+        self.end_time = end_ns
+        self.attributes = attributes if attributes is not None else {"key": "value"}
+        self.events: list = []
+
+    def get_span_context(self) -> Any:
+        class _Ctx:
+            def __init__(self, trace_id: int, span_id: int) -> None:
+                self.trace_id = trace_id
+                self.span_id = span_id
+        return _Ctx(self._trace_id, self._span_id)
+
+    @property
+    def status(self) -> Any:
+        class _Status:
+            status_code = None
+        return _Status()
 
 
 # ---------- 公共 fixture ----------
@@ -46,12 +107,18 @@ def obs_setup(tmp_path):
     """初始化可观测性模块状态，测试后恢复模块级单例。"""
     config = ObservabilityConfig(enabled=True, trace_dir=str(tmp_path))
     setup_observability(config)
+    # OTel 全局 TracerProvider 只能设置一次，后续调用会被忽略。
+    # 直接用新 provider 的 tracer 确保 Span 路由到当前 provider。
+    obs_context._tracer = obs_context._tracer_provider.get_tracer("sagent")
     yield config
     close_observability()
-    obs_context._exporter = None
-    obs_context._otlp_exporter = None
+    obs_context._tracer_provider = None
+    obs_context._meter_provider = None
+    obs_context._tracer = None
+    obs_context._local_exporter = None
     obs_context._obs_config = None
     obs_context._last_metric_flush = None
+    obs_context._metrics_recorded_spans.clear()
     metrics_module._metrics = None
     cost_module._pricing = {}
     content_module._observability_config = None
@@ -67,17 +134,12 @@ def metrics_setup():
 
 
 @pytest.fixture
-def capture_spans():
-    """捕获导出的 SpanRecord，测试后恢复 _export_span。"""
-    captured: list[SpanRecord] = []
-    original = obs_context._export_span
-
-    def _capture(record: SpanRecord) -> None:
-        captured.append(record)
-
-    obs_context._export_span = _capture
-    yield captured
-    obs_context._export_span = original
+def capture_spans(obs_setup):
+    """捕获导出的 SpanRecord，通过自定义 SpanExporter 实现。"""
+    capturing = _CapturingExporter()
+    processor = SimpleSpanProcessor(capturing)
+    obs_context._tracer_provider.add_span_processor(processor)
+    yield capturing.captured
 
 
 def _iso_pair(seconds: float = 1.0) -> tuple[str, str]:
@@ -128,14 +190,10 @@ def test_observability_config_metrics_flush_interval_exists():
 def test_span_root_context(capture_spans):
     """根 Span 的上下文 trace_id/span_id/parent_span_id 正确。"""
     with Span("root") as span:
-        ctx = current_span_context()
-        assert ctx is not None
-        assert ctx.trace_id == span.trace_id
-        assert ctx.span_id == span.span_id
-        assert ctx.parent_span_id == "-"
+        assert current_span_id() == span.span_id
+        assert current_parent_span_id() == "-"
 
     # 退出后上下文恢复为 None
-    assert current_span_context() is None
     assert current_span_id() == "-"
     assert current_parent_span_id() == "-"
 
@@ -145,13 +203,8 @@ def test_span_parent_child(capture_spans):
     with Span("root") as root_span:
         root_id = root_span.span_id
         with Span("child") as child_span:
-            ctx = current_span_context()
-            assert ctx is not None
-            assert ctx.parent_span_id == root_id
-            assert ctx.span_id == child_span.span_id
-
-    # 退出后上下文恢复为 None
-    assert current_span_context() is None
+            assert current_parent_span_id() == root_id
+            assert current_span_id() == child_span.span_id
 
     # 子 Span 先退出，根 Span 后退出
     assert len(capture_spans) == 2
@@ -425,10 +478,9 @@ def _make_span_record() -> SpanRecord:
 def test_local_export_span(tmp_path):
     """enabled=True 时写入 SpanRecord 到 JSONL 文件。"""
     config = ObservabilityConfig(enabled=True, trace_dir=str(tmp_path))
-    exporter = LocalExporter(config)
-    record = _make_span_record()
-    exporter.export_span(record)
-    exporter.close()
+    exporter = LocalSpanExporter(config)
+    exporter.export([_MockSpanData(name="test", attributes={"key": "value"})])
+    exporter.shutdown()
 
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     trace_file = tmp_path / f"sagent_trace_{today}.jsonl"
@@ -436,7 +488,6 @@ def test_local_export_span(tmp_path):
 
     lines = trace_file.read_text(encoding="utf-8").strip().split("\n")
     data = json.loads(lines[0])
-    assert data["trace_id"] == "t1"
     assert data["name"] == "test"
     assert data["attributes"]["key"] == "value"
 
@@ -444,22 +495,22 @@ def test_local_export_span(tmp_path):
 def test_local_export_disabled(tmp_path):
     """enabled=False 时不写入任何文件。"""
     config = ObservabilityConfig(enabled=False, trace_dir=str(tmp_path))
-    exporter = LocalExporter(config)
-    exporter.export_span(_make_span_record())
-    exporter.close()
+    exporter = LocalSpanExporter(config)
+    exporter.export([_MockSpanData()])
+    exporter.shutdown()
     assert not any(tmp_path.iterdir())
 
 
 def test_local_export_metric(tmp_path):
     """指标快照导出到 JSONL 文件。"""
     config = ObservabilityConfig(enabled=True, trace_dir=str(tmp_path))
-    exporter = LocalExporter(config)
+    exporter = LocalSpanExporter(config)
     snapshot = MetricSnapshot(
         timestamp=datetime.now(timezone.utc).isoformat(),
         metrics={"counter": {"": {"value": 1.0}}},
     )
     exporter.export_metric(snapshot)
-    exporter.close()
+    exporter.shutdown()
 
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     metric_file = tmp_path / f"sagent_metrics_{today}.jsonl"
@@ -469,9 +520,9 @@ def test_local_export_metric(tmp_path):
 def test_local_export_per_day_rolling(tmp_path):
     """文件名包含日期后缀（按天滚动）。"""
     config = ObservabilityConfig(enabled=True, trace_dir=str(tmp_path))
-    exporter = LocalExporter(config)
-    exporter.export_span(_make_span_record())
-    exporter.close()
+    exporter = LocalSpanExporter(config)
+    exporter.export([_MockSpanData()])
+    exporter.shutdown()
 
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     files = list(tmp_path.glob("sagent_trace_*.jsonl"))
@@ -481,66 +532,32 @@ def test_local_export_per_day_rolling(tmp_path):
 # ---------- 导出失败隔离 ----------
 
 
-def test_span_exit_catches_export_failure():
+def test_span_exit_catches_export_failure(obs_setup):
     """Span __exit__ 捕获导出失败，不抛异常。"""
-    original = obs_context._export_span
-
-    def raising_export(record: SpanRecord) -> None:
-        raise RuntimeError("export error")
-
-    obs_context._export_span = raising_export
-    try:
-        # 不应抛异常
-        with Span("test"):
+    class _RaisingExporter:
+        def export(self, spans):
+            from opentelemetry.sdk.trace.export import SpanExportResult
+            return SpanExportResult.FAILURE
+        def shutdown(self):
             pass
-    finally:
-        obs_context._export_span = original
+        def force_flush(self, timeout_millis=30000):
+            return True
+
+    processor = SimpleSpanProcessor(_RaisingExporter())
+    obs_context._tracer_provider.add_span_processor(processor)
+    # 不应抛异常
+    with Span("test"):
+        pass
 
 
 def test_local_exporter_write_failure_silent(tmp_path):
     """写入失败时静默处理，不抛异常。"""
     config = ObservabilityConfig(enabled=True, trace_dir=str(tmp_path))
-    exporter = LocalExporter(config)
+    exporter = LocalSpanExporter(config)
     # 构造无法序列化的对象会导致 json.dumps 失败，但 SpanRecord 是 pydantic 模型
     # 这里测试 close 后再 export 不抛异常
-    exporter.close()
-    exporter.export_span(_make_span_record())  # 关闭后写入不应抛异常
-
-
-# ---------- OTLP 降级 ----------
-
-
-def test_otlp_disabled():
-    """otlp_enabled=False 时 OTLPExporter 不可用。"""
-    config = ObservabilityConfig(otlp_enabled=False)
-    exporter = OTLPExporter(config)
-    assert not exporter.is_available()
-
-
-def test_otlp_graceful_degradation():
-    """otlp_enabled=True 但无 OpenTelemetry 时优雅降级。"""
-    config = ObservabilityConfig(
-        otlp_enabled=True, otlp_endpoint="http://localhost:4318"
-    )
-    exporter = OTLPExporter(config)
-    # 无 opentelemetry 依赖时 is_available() 返回 False
-    assert not exporter.is_available()
-
-
-def test_otlp_export_no_raise_when_unavailable():
-    """OTLP 不可用时 export_span / export_metric 不抛异常。"""
-    config = ObservabilityConfig(otlp_enabled=False)
-    exporter = OTLPExporter(config)
-    # 不应抛异常
-    exporter.export_span(_make_span_record())
-    exporter.export_metric(MetricSnapshot(timestamp="", metrics={}))
-    exporter.close()
-
-
-def test_is_otlp_available_returns_bool():
-    """is_otlp_available 返回布尔值。"""
-    result = is_otlp_available()
-    assert isinstance(result, bool)
+    exporter.shutdown()
+    exporter.export([_MockSpanData()])  # 关闭后写入不应抛异常
 
 
 # ---------- record_span_metrics 分发 ----------
@@ -721,27 +738,30 @@ def test_record_span_metrics_no_metrics_singleton():
 # ---------- 根 Span 注入累积值 ----------
 
 
-def test_root_span_injects_accumulation(metrics_setup, capture_spans):
+def test_root_span_injects_accumulation(capture_spans):
     """根 Span 退出时将 trace 累积值注入属性。"""
     start, end = _iso_pair(1.0)
-    trace_id = "t1"
-    # 先通过 gen_ai.chat 累积 token 到指定 trace
-    record_span_metrics(
-        "gen_ai.chat", trace_id,
-        {
-            "gen_ai.request.model": "gpt-4",
-            "gen_ai.provider.name": "openai",
-            "gen_ai.usage.input_tokens": 100,
-            "gen_ai.usage.output_tokens": 20,
-        },
-        "ok", start, end,
-    )
-    # 创建根 Span，使用相同的 trace_id 以关联累积值
-    with Span("agent.react", trace_id=trace_id) as span:
+    # 创建根 Span，获取 OTel 生成的 trace_id
+    with Span("agent.react") as span:
+        trace_id = span.trace_id
+        # 通过 gen_ai.chat 累积 token 到当前 trace
+        record_span_metrics(
+            "gen_ai.chat", trace_id,
+            {
+                "gen_ai.request.model": "gpt-4",
+                "gen_ai.provider.name": "openai",
+                "gen_ai.usage.input_tokens": 100,
+                "gen_ai.usage.output_tokens": 20,
+            },
+            "ok", start, end,
+        )
         span.set_attribute("sagent.iteration_count", 1)
 
     record = capture_spans[0]
     assert record.attributes.get("sagent.accumulated_input_tokens") == 100.0
     assert record.attributes.get("sagent.accumulated_output_tokens") == 20.0
     # trace 被清除
-    assert metrics_setup.get_trace_accumulation(trace_id) == {}
+    from sagent.observability import get_metrics
+    metrics = get_metrics()
+    assert metrics is not None
+    assert metrics.get_trace_accumulation(trace_id) == {}

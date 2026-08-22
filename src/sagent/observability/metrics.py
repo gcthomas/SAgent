@@ -1,6 +1,8 @@
 """指标聚合系统。
 
-提供进程内计数器、直方图和按 trace 累积的 token/成本聚合。
+基于 OpenTelemetry Meter 创建 Counter 和 Histogram instrument，
+同时保留并行本地存储用于 snapshot() 快照生成。
+提供按 trace 累积的 token/成本聚合和 SpanProcessor 派发。
 指标标签仅使用 ALLOWED_METRIC_LABELS 中的低基数维度。
 """
 
@@ -8,6 +10,10 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from typing import Any
+
+from opentelemetry import metrics
+from opentelemetry.sdk.trace import SpanProcessor
+from opentelemetry.trace import Span as OTelSpan
 
 from ..config.models import ObservabilityConfig
 from .cost import calculate_cost
@@ -45,7 +51,7 @@ def _latency_ms(start_time: str, end_time: str) -> float | None:
 
 
 class _Histogram:
-    """直方图聚合器。
+    """直方图聚合器（本地存储，用于 snapshot）。
 
     记录 count、sum、min、max、avg 统计值。
     """
@@ -93,16 +99,59 @@ class MetricsRegistry:
     """指标注册表。
 
     管理计数器、直方图和按 trace 累积的数据，提供快照生成与重置。
+    同时向 OTel Meter instrument 双写，用于 OTLP 导出。
     """
 
     def __init__(self, config: ObservabilityConfig | None = None) -> None:
         self._config = config
-        # 计数器：name -> labels_key -> value
+        # 计数器本地存储：name -> labels_key -> value
         self._counters: dict[str, dict[str, float]] = {}
-        # 直方图：name -> labels_key -> _Histogram
+        # 直方图本地存储：name -> labels_key -> _Histogram
         self._histograms: dict[str, dict[str, _Histogram]] = {}
         # 按 trace 累积
         self._trace_acc: dict[str, _TraceAccumulation] = {}
+        # OTel Meter instrument 缓存
+        self._otel_counters: dict[str, metrics.Counter] = {}
+        self._otel_histograms: dict[str, metrics.Histogram] = {}
+        self._meter = self._get_meter()
+
+    def _get_meter(self) -> Any:
+        """获取 OTel Meter 实例。"""
+        try:
+            return metrics.get_meter("sagent")
+        except Exception:
+            logger.debug("获取 OTel Meter 失败", exc_info=True)
+            return None
+
+    def _get_otel_counter(self, name: str) -> metrics.Counter | None:
+        """获取或创建 OTel Counter instrument。"""
+        if self._meter is None:
+            return None
+        if name not in self._otel_counters:
+            try:
+                self._otel_counters[name] = self._meter.create_counter(
+                    name=name,
+                    description=f"Counter: {name}",
+                )
+            except Exception:
+                logger.debug("创建 OTel Counter 失败: name=%s", name, exc_info=True)
+                return None
+        return self._otel_counters[name]
+
+    def _get_otel_histogram(self, name: str) -> metrics.Histogram | None:
+        """获取或创建 OTel Histogram instrument。"""
+        if self._meter is None:
+            return None
+        if name not in self._otel_histograms:
+            try:
+                self._otel_histograms[name] = self._meter.create_histogram(
+                    name=name,
+                    description=f"Histogram: {name}",
+                )
+            except Exception:
+                logger.debug("创建 OTel Histogram 失败: name=%s", name, exc_info=True)
+                return None
+        return self._otel_histograms[name]
 
     def _labels_key(self, labels: dict[str, str]) -> str:
         """将标签字典转换为稳定的字符串键。"""
@@ -125,9 +174,17 @@ class MetricsRegistry:
         """
         filtered = _filter_labels(labels)
         key = self._labels_key(filtered)
+        # 本地存储
         if name not in self._counters:
             self._counters[name] = {}
         self._counters[name][key] = self._counters[name].get(key, 0.0) + value
+        # OTel instrument 双写
+        otel_counter = self._get_otel_counter(name)
+        if otel_counter is not None:
+            try:
+                otel_counter.add(value, filtered)
+            except Exception:
+                logger.debug("OTel Counter add 失败: name=%s", name, exc_info=True)
 
     def record_histogram(
         self,
@@ -144,11 +201,19 @@ class MetricsRegistry:
         """
         filtered = _filter_labels(labels)
         key = self._labels_key(filtered)
+        # 本地存储
         if name not in self._histograms:
             self._histograms[name] = {}
         if key not in self._histograms[name]:
             self._histograms[name][key] = _Histogram()
         self._histograms[name][key].record(value)
+        # OTel instrument 双写
+        otel_hist = self._get_otel_histogram(name)
+        if otel_hist is not None:
+            try:
+                otel_hist.record(value, filtered)
+            except Exception:
+                logger.debug("OTel Histogram record 失败: name=%s", name, exc_info=True)
 
     def accumulate_tokens(
         self,
@@ -215,21 +280,21 @@ class MetricsRegistry:
 
     def snapshot(self) -> MetricSnapshot:
         """生成指标快照。"""
-        metrics: dict[str, Any] = {}
+        metrics_data: dict[str, Any] = {}
         # 计数器
         for name, label_map in self._counters.items():
-            metrics[name] = {
+            metrics_data[name] = {
                 key: {"value": val} for key, val in label_map.items()
             }
         # 直方图
         for name, label_map in self._histograms.items():
-            if name not in metrics:
-                metrics[name] = {}
+            if name not in metrics_data:
+                metrics_data[name] = {}
             for key, hist in label_map.items():
-                metrics[name][key] = hist.snapshot()
+                metrics_data[name][key] = hist.snapshot()
         return MetricSnapshot(
             timestamp=datetime.now(timezone.utc).isoformat(),
-            metrics=metrics,
+            metrics=metrics_data,
             labels={},
         )
 
@@ -376,15 +441,79 @@ def record_span_metrics(
         _metrics.accumulate_tool_call(trace_id)
 
 
-def flush_metrics() -> None:
-    """生成指标快照并通过 LocalExporter 导出，然后重置指标。"""
-    if _metrics is None:
-        return
-    try:
-        snapshot = _metrics.snapshot()
-        from .context import _exporter
+class MetricsSpanProcessor(SpanProcessor):
+    """Span 处理器，在 Span 结束时派发指标记录。
 
-        if _exporter is not None:
-            _exporter.export_metric(snapshot)
-    except Exception:
-        logger.exception("指标 flush 失败", extra={"event": "metrics_flush_error"})
+    从 OTel ReadableSpan 的 attributes 读取业务属性，
+    调用 record_span_metrics 进行指标聚合。
+    所有异常静默处理，不影响 Agent 主流程。
+    """
+
+    def on_start(
+        self, span: OTelSpan, parent_context: Any = None
+    ) -> None:
+        """Span 开始时的回调（无操作）。"""
+        pass
+
+    def on_end(self, span: Any) -> None:
+        """Span 结束时的回调，派发指标记录。
+
+        参数:
+            span: OTel ReadableSpan，包含 span 名称、trace_id 和 attributes。
+        """
+        try:
+            if _metrics is None:
+                return
+            # 检查是否已由 Span.__exit__ 记录过指标，避免双写
+            span_context = span.get_span_context()
+            span_id = span_context.span_id
+            try:
+                from .context import _metrics_recorded_spans
+                if span_id in _metrics_recorded_spans:
+                    return  # 已由 Span.__exit__ 记录，跳过
+            except ImportError:
+                logger.debug("导入 _metrics_recorded_spans 失败，跳过去重检查", exc_info=True)
+            span_name = span.name
+            trace_id = format(span_context.trace_id, "032x")
+            attrs = dict(span.attributes) if span.attributes else {}
+            # 映射 OTel StatusCode 到本地状态字符串
+            status_obj = span.status
+            if status_obj is not None and hasattr(status_obj, "status_code"):
+                from opentelemetry.trace import StatusCode
+                if status_obj.status_code == StatusCode.ERROR:
+                    status_str = "error"
+                else:
+                    status_str = "ok"
+            else:
+                status_str = "ok"
+            # 从 OTel span 的时间戳提取 start/end 时间
+            start_ns = span.start_time
+            end_ns = span.end_time
+            start_time = ""
+            end_time = ""
+            if start_ns is not None:
+                start_time = datetime.fromtimestamp(
+                    start_ns / 1e9, tz=timezone.utc
+                ).isoformat()
+            if end_ns is not None:
+                end_time = datetime.fromtimestamp(
+                    end_ns / 1e9, tz=timezone.utc
+                ).isoformat()
+            record_span_metrics(
+                name=span_name,
+                trace_id=trace_id,
+                attributes=attrs,
+                status=status_str,
+                start_time=start_time,
+                end_time=end_time,
+            )
+        except Exception:
+            logger.debug("MetricsSpanProcessor.on_end 指标记录失败", exc_info=True)
+
+    def shutdown(self) -> None:
+        """关闭处理器（无操作）。"""
+        pass
+
+    def force_flush(self, timeout_millis: int = 30000) -> bool:
+        """强制 flush（无操作）。"""
+        return True

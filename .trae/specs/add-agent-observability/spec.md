@@ -49,7 +49,7 @@ agent.run (根：一轮用户交互)
 ## ADDED Requirements
 
 ### Requirement: 层次化执行追踪
-系统 SHALL 为每轮非斜杠用户交互创建一个根 Span，并以统一的观测上下文接口维护当前 trace/span 上下文。默认实现可使用 `ContextVar`；启用 OpenTelemetry SDK 时 SHALL 与其上下文传播保持一致，且不得生成重复根 Span。所有在根 Span 生命周期内发生的嵌套操作 SHALL 自动继承 trace ID 和当前父 Span ID；根 Span 完成后 SHALL 记录总耗时、最终状态、执行模式、迭代次数、工具调用次数、压缩次数、累计 token 与估算成本。
+系统 SHALL 为每轮非斜杠用户交互创建一个根 Span，并以 OpenTelemetry SDK 的上下文传播机制维护当前 trace/span 上下文。所有在根 Span 生命周期内发生的嵌套操作 SHALL 自动继承 trace ID 和当前父 Span ID；根 Span 完成后 SHALL 记录总耗时、最终状态、执行模式、迭代次数、工具调用次数、压缩次数、累计 token 与估算成本。系统 SHALL 通过薄 Span 包装层在 OTel Span 的 `end()` 调用之前注入 trace 累积值和 iteration 计数等业务属性，保证 OTLP 导出和本地导出的根 Span 属性完整。trace_id SHALL 使用 OTel 原生 32 字符 hex 格式，span_id SHALL 使用 16 字符 hex 格式。根 Span 的 `parent_span_id` 在 `SpanRecord` 和本地导出中 SHALL 保留 `"-"` 哨兵值，用于根检测和向后兼容。
 
 #### Scenario: ReAct 工具调用成功
 - **WHEN** ReAct 在同一轮交互中调用 LLM、获得工具调用并成功执行工具
@@ -98,12 +98,12 @@ agent.run (根：一轮用户交互)
 - **THEN** 系统只写入脱敏后且不超过配置长度上限的内容，并在 trace 中标记 `sagent.content.capture=true`
 
 ### Requirement: 本地可查询与标准导出
-系统 SHALL 默认将已结束的 Span 和周期性指标写入按天滚动的 JSON Lines 文件；每条 Span 包含 trace ID、span ID、parent span ID、名称、开始/结束时间、状态、脱敏属性和事件；若本轮交互属于已建立的会话，则额外包含脱敏后的 `session_id`。日志和 Span 可按 `trace_id` 重建单轮树，也可按 `session_id` 聚合多轮交互。系统 SHALL 可选地使用 OTLP 导出 traces 与 metrics，并通过配置控制 endpoint、协议和超时。
+系统 SHALL 默认将已结束的 Span 和周期性指标写入按天滚动的 JSON Lines 文件；每条 Span 包含 trace ID、span ID、parent span ID、名称、开始/结束时间、状态、脱敏属性和事件；若本轮交互属于已建立的会话，则额外包含脱敏后的 `session_id`。日志和 Span 可按 `trace_id` 重建单轮树，也可按 `session_id` 聚合多轮交互。本地 JSON Lines 导出 SHALL 通过实现 OTel SDK 的 `SpanExporter` 接口完成，复用按天滚动文件写入器。导出前 SHALL 对 Span 属性和事件递归脱敏。`SpanRecord` 模型作为 OTel Span 到本地 JSON Lines 的中间映射层保留。当 `observability.otlp_enabled` 为 true 时，系统 SHALL 使用 OTel SDK 原生的 `OTLPSpanExporter` 和 `BatchSpanProcessor` 导出 traces，使用 `PeriodicExportingMetricReader` 导出 metrics，通过配置控制 endpoint、协议和超时。
 
 #### Scenario: 本地调试单轮 trace
 - **WHEN** 开发者获得一个现有 trace ID
 - **THEN** 可从本地 trace 文件按该 trace ID 检索所有 Span，并依据 parent span ID 重建有序 Span 树
-- **THEN** 现有业务 JSON 日志保留 `trace_id` 并新增相关 span 标识，原有日志检索方式保持可用
+- **THEN** 现有业务 JSON 日志保留 `trace_id` 并新增相关 span 标识，原有日志检索方式保持可用（ID 长度从 8 变为 32 字符）
 
 #### Scenario: 导出不可用
 - **WHEN** OTLP endpoint 不可达、超时或返回失败
@@ -111,17 +111,17 @@ agent.run (根：一轮用户交互)
 - **THEN** Agent 调用、工具执行和最终回复不因导出失败而失败或明显等待
 
 ### Requirement: 配置、依赖与兼容性
-系统 SHALL 通过新增 `observability` 配置段控制启用状态、本地输出位置、内容采集、内容最大长度、脱敏、模型价格表（字段 `input_price_per_million` / `output_price_per_million`，单位元/百万 token）、OTLP 导出与指标刷新周期。默认本地观测 SHALL 不依赖 OpenTelemetry 包；仅在 `observability.otlp_enabled` 为 true 时尝试加载 `opentelemetry-api`、`opentelemetry-sdk` 和 `opentelemetry-exporter-otlp-proto-http`。依赖缺失时 SHALL 记录脱敏诊断并继续执行本地观测和 Agent 主流程。既有 `logging` 配置和 `log_llm_content` SHALL 继续被解析；内容采集的最终有效值必须同时满足观测内容采集开关和日志内容开关，并始终通过脱敏器。
+系统 SHALL 通过新增 `observability` 配置段控制启用状态、本地输出位置、内容采集、内容最大长度、脱敏、模型价格表（字段 `input_price_per_million` / `output_price_per_million`，单位元/百万 token）、OTLP 导出与指标刷新周期。系统 SHALL 依赖 OpenTelemetry SDK（`opentelemetry-api`、`opentelemetry-sdk`、`opentelemetry-exporter-otlp-proto-http`）作为可观测性引擎，用于上下文传播、Span 生命周期、指标 instrument 和 OTLP 导出。安装 `requirements.txt` 中的依赖即可运行全部观测能力。`observability.otlp_enabled` 控制 OTLP 导出器是否加入 provider 链；为 false 时仅本地 JSON Lines 导出，为 true 时同时本地和 OTLP 导出。既有 `logging` 配置和 `log_llm_content` SHALL 继续被解析；内容采集的最终有效值必须同时满足观测内容采集开关和日志内容开关，并始终通过脱敏器。
 
-#### Scenario: 未安装可选 OTLP 依赖
-- **WHEN** `observability.otlp_enabled` 为 true，但未安装 OpenTelemetry 可选依赖
-- **THEN** 系统保留本地 JSON Lines Trace/Metric 导出并记录脱敏后的依赖缺失诊断
-- **THEN** Agent 调用、工具执行和最终回复不失败
-
-#### Scenario: 默认本地观测
-- **WHEN** 使用默认配置且未安装 OpenTelemetry 包
+#### Scenario: OTLP 禁用
+- **WHEN** `observability.otlp_enabled` 为 false
+- **THEN** 系统仅使用本地 JSON Lines 导出，不初始化 OTLP exporter
 - **THEN** Span 树、指标聚合、脱敏和本地 JSON Lines 导出正常可用
-- **THEN** 安装现有 `requirements.txt` 中的依赖即可运行该能力
+
+#### Scenario: OTLP 启用
+- **WHEN** `observability.otlp_enabled` 为 true
+- **THEN** 系统通过 OTel SDK 原生 `OTLPSpanExporter` 导出 Span，通过 `PeriodicExportingMetricReader` 导出指标
+- **THEN** OTLP endpoint 不可达时本地导出不受影响
 
 #### Scenario: 不启用增强观测
 - **WHEN** `observability.enabled` 为 false

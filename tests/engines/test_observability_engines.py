@@ -6,9 +6,10 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Sequence
 
 import pytest
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor, SpanExportResult
 from pydantic import BaseModel
 
 from conftest import make_tool_call, text_response, tool_response
@@ -20,6 +21,7 @@ from sagent.observability import Span, close_observability, setup_observability
 from sagent.observability import content as content_module
 from sagent.observability import context as obs_context
 from sagent.observability import cost as cost_module
+from sagent.observability.exporter import _span_data_to_record
 from sagent.observability import metrics as metrics_module
 from sagent.tools import build_default_registry
 from sagent.tools.base import Tool
@@ -81,6 +83,28 @@ class _FailingTool(Tool):
         raise RuntimeError("工具执行失败")
 
 
+class _CapturingExporter:
+    """测试用 SpanExporter，捕获 SpanRecord 而不写文件。"""
+
+    def __init__(self) -> None:
+        self.captured: list = []
+
+    def export(self, spans: Any) -> SpanExportResult:
+        for span in spans:
+            try:
+                record = _span_data_to_record(span)
+                self.captured.append(record)
+            except Exception:
+                pass
+        return SpanExportResult.SUCCESS
+
+    def shutdown(self) -> None:
+        pass
+
+    def force_flush(self, timeout_millis: int = 30000) -> bool:
+        return True
+
+
 # ---------- 公共 fixture ----------
 
 
@@ -98,23 +122,24 @@ def obs_env(tmp_path):
         },
     )
     setup_observability(config)
+    # OTel 全局 TracerProvider 只能设置一次，后续调用会被忽略。
+    # 直接用新 provider 的 tracer 确保 Span 路由到当前 provider。
+    obs_context._tracer = obs_context._tracer_provider.get_tracer("sagent")
 
-    captured: list = []
-    original_export = obs_context._export_span
+    capturing = _CapturingExporter()
+    processor = SimpleSpanProcessor(capturing)
+    obs_context._tracer_provider.add_span_processor(processor)
 
-    def _capture(record: Any) -> None:
-        captured.append(record)
+    yield capturing.captured
 
-    obs_context._export_span = _capture
-
-    yield captured
-
-    obs_context._export_span = original_export
     close_observability()
-    obs_context._exporter = None
-    obs_context._otlp_exporter = None
+    obs_context._tracer_provider = None
+    obs_context._meter_provider = None
+    obs_context._tracer = None
+    obs_context._local_exporter = None
     obs_context._obs_config = None
     obs_context._last_metric_flush = None
+    obs_context._metrics_recorded_spans.clear()
     metrics_module._metrics = None
     cost_module._pricing = {}
     content_module._observability_config = None

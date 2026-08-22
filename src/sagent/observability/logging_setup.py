@@ -1,12 +1,12 @@
 """日志系统搭建。
 
 提供统一的日志初始化、JSON 结构化格式化、按天滚动的文件日志，以及基于
-contextvars 的 trace_id 全链路关联能力。
+OpenTelemetry context 的 trace_id/span_id 全链路关联能力。
 
 设计要点：
 - 文件日志：JSON 每行一条，按天滚动（TimedRotatingFileHandler），便于按日期定位。
 - 控制台日志：简洁纯文本，默认 INFO，避免刷屏；不影响 CLI 面向用户的 print 展示。
-- trace_id：每次用户问答生成一个短 id 注入到当次全部日志，便于串联整条链路检索。
+- trace_id：每次用户问答生成一个 32 字符 hex id 注入到当次全部日志，便于串联整条链路检索。
 - 事件专有字段通过 logger.xxx(msg, extra={...}) 传入，会被序列化进 JSON。
 """
 
@@ -37,8 +37,8 @@ _RESERVED_ATTRS = set(
 
 
 def new_trace_id() -> str:
-    """生成一个短 trace_id 并设置为当前上下文的 trace_id。"""
-    trace_id = uuid.uuid4().hex[:8]
+    """生成一个 32 字符 hex trace_id 并设置为当前上下文的 trace_id。"""
+    trace_id = uuid.uuid4().hex
     set_trace_id(trace_id)
     return trace_id
 
@@ -67,15 +67,25 @@ class _TraceIdFilter(logging.Filter):
     """将当前上下文的 trace_id、span_id、parent_span_id 注入到每条日志记录。"""
 
     def filter(self, record: logging.LogRecord) -> bool:
-        # 延迟导入避免与 context 模块的循环依赖
-        from .context import current_span_context
+        # 从 OTel context 读取当前 span
+        from opentelemetry import trace
 
-        ctx = current_span_context()
-        if ctx is not None:
-            record.trace_id = ctx.trace_id
-            record.span_id = ctx.span_id
-            record.parent_span_id = ctx.parent_span_id
+        span = trace.get_current_span()
+        if span is not None and span.is_recording():
+            span_context = span.get_span_context()
+            record.trace_id = format(span_context.trace_id, "032x")
+            record.span_id = format(span_context.span_id, "016x")
+            # 获取 parent span_id
+            parent = getattr(span, "parent", None)
+            if parent is not None:
+                try:
+                    record.parent_span_id = format(parent.span_id, "016x")
+                except (AttributeError, ValueError):
+                    record.parent_span_id = "-"
+            else:
+                record.parent_span_id = "-"
         else:
+            # 不在 span 中时回退到 _trace_id_var
             record.trace_id = current_trace_id()
             record.span_id = "-"
             record.parent_span_id = "-"

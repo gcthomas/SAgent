@@ -8,7 +8,7 @@
 
 - **项目类型**：CLI 工具 / Python 应用
 - **核心功能**：命令行交互式 Agent，支持工具调用与多轮编排
-- **技术栈**：Python 3.10+、openai SDK、pydantic v2、pyyaml、mcp SDK、pytest、sqlite3（标准库）
+- **技术栈**：Python 3.10+、openai SDK、pydantic v2、pyyaml、mcp SDK、OpenTelemetry SDK、pytest、sqlite3（标准库）
 - **架构说明**：
   - 两种执行模式：ReAct（推理-行动-观察循环）、Plan（拆解-逐步执行-汇总）
   - 工具系统基于 pydantic 定义参数 schema，对接 LLM function calling
@@ -17,7 +17,7 @@
   - 长期记忆：基于两个 Markdown 文件（USER.md / MEMORY.md）的跨会话记忆，LLM 通过记忆工具自主读写，写入前自动安全扫描（凭证泄露/Prompt 注入/Shell 后门/不可见字符），写入超限时自动反思整理，会话开始前注入冻结前缀
   - 兼容任意 OpenAI 兼容的 LLM 服务（通过 base_url 指定）
   - 配置集中在 YAML 文件，敏感项支持环境变量覆盖
-  - 内置 JSON 结构化日志，按天滚动，带 trace_id 全链路关联
+  - 内置基于 OpenTelemetry SDK 的可观测性：Span 树追踪、指标聚合、成本估算、脱敏、本地 JSON Lines 导出与可选 OTLP 导出，按天滚动，trace_id 全链路关联
 
 ## 开发命令
 
@@ -83,7 +83,7 @@ src/sagent/
   cli/app.py                CLI 应用：参数解析、交互循环、引擎构建、斜杠命令分发、会话集成
   cli/commands.py           斜杠命令纯函数解析器 parse_command（与命令族无关，非斜杠输入返回 None）
   config/
-    models.py               配置模型（pydantic）：LLMConfig、AgentConfig、LoggingConfig、ContextConfig、SessionConfig、AppConfig
+    models.py               配置模型（pydantic）：LLMConfig、AgentConfig、LoggingConfig、ContextConfig、SessionConfig、MemoryConfig、ObservabilityConfig、MCPConfig、AppConfig
     loader.py               YAML 配置加载 + 环境变量覆盖 + 校验
   llm/client.py             LLM 客户端：封装 openai SDK，统一 LLMResponse 结构（含 usage 字段）
   core/
@@ -118,11 +118,19 @@ src/sagent/
       provider.py           MCPToolProvider：实现 ToolProvider，连接->发现->过滤->返回 MCPTool 列表
       __init__.py           包公开接口与 build_mcp_providers() 工厂函数
   observability/
-    logging_setup.py        JSON 结构化日志、按天滚动、trace_id 上下文关联
+    __init__.py             公开接口导出
+    context.py              Span 薄包装层 + OTel SDK 集成：上下文传播、根 Span 注入累积值、setup_observability/close_observability
+    metrics.py              指标聚合：Counter/Histogram 双写（本地+OTel）、_TraceAccumulation、MetricsSpanProcessor、record_span_metrics
+    exporter.py             LocalSpanExporter（实现 OTel SpanExporter 接口）、SpanData→SpanRecord 转换、按天滚动 JSON Lines 写入
+    logging_setup.py        JSON 结构化日志、按天滚动、_TraceIdFilter 从 OTel context 读取 trace_id/span_id/parent_span_id
+    models.py               数据模型：SpanRecord、MetricSnapshot、SpanEvent、ALLOWED_METRIC_LABELS
+    cost.py                 成本估算：基于模型价格表（元/百万 token）计算 LLM 调用成本
+    redactor.py             递归脱敏器：对 Span 属性和事件中的敏感字段做脱敏
+    content.py              内容采集控制：capture_content 开关与最大长度截断
 tests/
   conftest.py               公共 fixture：FakeLLMClient、make_tool_call、text_response（支持 usage）
-  unit/                     单元测试（配置、工具、注册表、Plan 解析、上下文管理、会话存储与管理、记忆存储与管理、记忆安全扫描、记忆工具、斜杠命令解析，无需 LLM）
-  engines/                  引擎测试（ReAct / Plan，用 FakeLLMClient 离线回放）
+  unit/                     单元测试（配置、工具、注册表、Plan 解析、上下文管理、会话存储与管理、记忆存储与管理、记忆安全扫描、记忆工具、斜杠命令解析、可观测性，无需 LLM）
+  engines/                  引擎测试（ReAct / Plan + 可观测性集成，用 FakeLLMClient 离线回放）
   evals/                    Agent 能力评测（离线回放 + 可选真实 LLM）
 ```
 
@@ -148,7 +156,10 @@ tests/
 - **`src/sagent/tools/mcp/tool.py`**：MCP 工具包装。`MCPTool` 继承 `Tool` 基类，覆写 `to_openai_schema()` 直接使用 MCP 原始 JSON schema（不依赖 pydantic model_json_schema），覆写 `validate_args()` 直接返回原始 dict（MCP 服务端负责校验），`run()` 委托 `MCPSessionManager.call_tool()` 执行。工具名强制 `mcp_{server}_{tool}` 前缀，防冲突且可辨识来源。
 - **`src/sagent/tools/mcp/provider.py`**：MCP 工具提供者。`MCPToolProvider` 实现 `ToolProvider` 接口，`provide_tools()` 中调用 `session_manager.connect_server` 连接并发现工具，用 `ToolFilter` 过滤，为每个通过过滤的工具创建 `MCPTool` 实例返回。连接失败返回空列表不抛异常。
 - **`src/sagent/tools/mcp/filtering.py`**：MCP 工具过滤器。纯 Python 实现不依赖 MCP SDK。`ToolFilter(allow, deny)` 通过 allow/deny 两个列表控制白名单/黑名单：均空不过滤、allow 非空白名单、deny 非空黑名单、两者均非空先白名单再排除 deny。
-- **`src/sagent/observability/logging_setup.py`**：日志系统。文件日志为 JSON 每行一条，按天滚动；控制台为纯文本。每次问答生成 trace_id 注入全部日志。
+- **`src/sagent/observability/context.py`**：Span 上下文管理 + OTel SDK 集成入口。`Span` 类为薄包装层，内部通过 OTel `tracer.start_as_current_span()` 创建和管理 Span 生命周期，在 `__exit__` 中 `span.end()` 调用前注入 trace 累积值和 iteration 计数等业务属性。`setup_observability()` 初始化 TracerProvider/MeterProvider、注册 Span 处理器（MetricsSpanProcessor、LocalSpanExporter、可选 OTLP BatchSpanProcessor）和 PeriodicExportingMetricReader。`close_observability()` 负责关闭所有 provider 和导出器。trace_id 为 OTel 原生 32 字符 hex，span_id 为 16 字符 hex，根 Span 的 `parent_span_id` 保留 `"-"` 哨兵值。
+- **`src/sagent/observability/metrics.py`**：指标聚合系统。`MetricsRegistry` 管理 Counter/Histogram 双写（本地 dict 存储 + OTel Meter instrument），保留 `_TraceAccumulation` 按 trace 累积 token/成本/迭代/工具/压缩数据。`record_span_metrics()` 按 Span 名称（agent.run / gen_ai.chat / tool.execute / context.compress / agent.react / agent.finalize / mcp.tool_call）派发指标记录。`MetricsSpanProcessor` 实现 OTel `SpanProcessor.on_end`，从 `ReadableSpan` 读取属性并调用 `record_span_metrics`，通过 `_metrics_recorded_spans` 集合与 `Span.__exit__` 去重防止双写。`_Histogram` 类保留用于本地 snapshot 存储。
+- **`src/sagent/observability/exporter.py`**：本地 JSON Lines 导出器。`LocalSpanExporter` 实现 OTel `SpanExporter` 接口（`export(spans)` / `shutdown()`），通过 `_span_data_to_record()` 将 OTel `SpanData` 转换为 `SpanRecord`，导出前对属性和事件递归脱敏。`_DailyJsonLinesWriter` 提供按天滚动文件写入。同时支持 `export_metric(snapshot)` 导出指标快照。
+- **`src/sagent/observability/logging_setup.py`**：日志系统。文件日志为 JSON 每行一条，按天滚动；控制台为纯文本。`_TraceIdFilter` 从 OTel context 读取当前 span 的 trace_id（32 字符 hex）、span_id（16 字符 hex）和 parent_span_id 注入日志。`new_trace_id()` 生成 32 字符 hex 用于日志关联。
 
 ## 代码规范
 
@@ -169,11 +180,12 @@ tests/
 ### 配置与数据建模
 
 - 配置结构使用 pydantic `BaseModel`，字段带 `Field(..., description=...)`
-- 配置模型包括：`LLMConfig`、`AgentConfig`、`LoggingConfig`、`ContextConfig`（上下文管理）、`SessionConfig`（会话管理）、`MemoryConfig`（长期记忆）、`AppConfig`（顶层聚合）
+- 配置模型包括：`LLMConfig`、`AgentConfig`、`LoggingConfig`、`ContextConfig`（上下文管理）、`SessionConfig`（会话管理）、`MemoryConfig`（长期记忆）、`ObservabilityConfig`（可观测性）、`MCPConfig`（MCP 工具提供者）、`AppConfig`（顶层聚合）
 - `ContextConfig` 控制 token 预算（`max_context_tokens`）、压缩阈值（`compression_threshold` / `safe_threshold`）、压缩策略参数（`keep_recent_messages`、`max_tool_output_tokens`、`enable_summary`、`summary_max_tokens`）、token 计数方式（`token_counter_method`）、混合校准开关（`use_api_calibration`）
 - `SessionConfig` 控制会话管理（`enabled` 开关、`db_path` SQLite 路径、`enable_fts` FTS5 全文索引、`auto_save` 每轮自动增量保存）；`AppConfig.session` 缺省可用
 - `MemoryConfig` 控制长期记忆（`enabled` 开关、`dir` 记忆文件目录、`user_max_chars` / `memory_max_chars` 字符上限触发反思整理）；`AppConfig.memory` 缺省可用
 - `MCPConfig` 控制 MCP 工具提供者（`enabled` 开关默认 false、`servers` 服务器配置列表）；`MCPServerConfig` 定义单个服务器（`name`、`transport` stdio/sse/streamable_http、`command`/`args`/`env`/`cwd` stdio 参数、`url` 远程地址、`enabled` 服务器开关、`tool_filter` 工具过滤、`connect_timeout` 连接超时默认 30 秒、`call_timeout` 调用超时默认 60 秒）；`ToolFilterConfig` 控制工具过滤（`allow`/`deny` 列表）；`AppConfig.mcp` 缺省可用
+- `ObservabilityConfig` 控制可观测性（`enabled` 开关、`trace_dir` / `trace_file` / `metric_file` 本地输出位置、`capture_content` 内容采集开关、`capture_max_length` 内容截断长度、`model_pricing` 模型价格表 `input_price_per_million` / `output_price_per_million`（元/百万 token）、`otlp_enabled` OTLP 导出开关、`otlp_endpoint` OTLP 地址、`otlp_timeout` OTLP 超时、`metrics_flush_interval` 指标刷新周期）；`AppConfig.observability` 缺省可用
 - 工具参数使用 pydantic 模型定义 `args_schema`，自动生成 JSON schema 供 function calling
 
 ### 日志
@@ -182,6 +194,7 @@ tests/
 - 事件字段通过 `extra={"event": "xxx", ...}` 传入，会被序列化进 JSON 日志
 - ⚠️ **不要使用 `message`、`asctime`、`trace_id` 作为 extra 的 key**，它们是日志保留属性，会冲突
 - 异常使用 `logger.exception()` 记录堆栈
+- 非阻塞路径中的异常（如 Span 属性设置、OTel instrument 双写、本地文件写入失败）使用 `logger.debug(..., exc_info=True)` 记录，不影响主流程但可开启 DEBUG 级别排查
 
 ### 工具开发约定
 
@@ -204,8 +217,8 @@ tests/
 
 ### 测试分层
 
-1. **单元测试**（`tests/unit/`）：不依赖 LLM，覆盖配置加载、工具执行与容错、注册表、Plan 步骤解析、上下文管理（压缩策略、token 计数、混合校准、seq 维护与增量导出）、会话存储（建表/CRUD/增量追加/压缩事件/工作上下文还原/FTS5 降级）、会话管理（创建/切换/增量保存/删除保护）、记忆存储（加载/追加/替换/删除/原子落盘/字符上限检查）、记忆管理（前缀注入/写入前安全扫描/反思整理/写入超限触发）、记忆安全扫描（四类规则命中/未误报/集成/审计日志）、记忆工具（参数校验/委托执行）、斜杠命令解析（`parse_command` 纯函数用例）
-2. **引擎测试**（`tests/engines/`）：使用 `FakeLLMClient` 按预设响应队列离线回放，验证 ReAct / Plan 多轮编排逻辑，快速且可复现
+1. **单元测试**（`tests/unit/`）：不依赖 LLM，覆盖配置加载、工具执行与容错、注册表、Plan 步骤解析、上下文管理（压缩策略、token 计数、混合校准、seq 维护与增量导出）、会话存储（建表/CRUD/增量追加/压缩事件/工作上下文还原/FTS5 降级）、会话管理（创建/切换/增量保存/删除保护）、记忆存储（加载/追加/替换/删除/原子落盘/字符上限检查）、记忆管理（前缀注入/写入前安全扫描/反思整理/写入超限触发）、记忆安全扫描（四类规则命中/未误报/集成/审计日志）、记忆工具（参数校验/委托执行）、斜杠命令解析（`parse_command` 纯函数用例）、可观测性（Span 上下文管理、指标聚合与 record_span_metrics 派发、成本估算、本地导出器 SpanExporter 接口、OTel SDK 集成 SpanProcessor/SpanExporter）
+2. **引擎测试**（`tests/engines/`）：使用 `FakeLLMClient` 按预设响应队列离线回放，验证 ReAct / Plan 多轮编排逻辑，快速且可复现；包含可观测性引擎集成测试（Span 树结构、父子关系、累积指标验证）
 3. **能力评测**（`tests/evals/`）：以数据形式集中定义评测场景。默认走离线回放；设置 `RUN_LLM_EVALS=1` 调用真实模型并用 LLM-as-judge 打分
 
 ### FakeLLMClient 约定
@@ -223,11 +236,12 @@ tests/
 
 ## 调试技巧
 
-- **日志检索**：每次问答生成 8 位 trace_id，可按 trace_id 检索整条链路：
+- **日志检索**：每次问答生成 OTel 原生 32 字符 hex trace_id，可按 trace_id 检索整条链路：
   ```powershell
-  Select-String -Path logs/sagent.log -Pattern '"trace_id": "a1b2c3d4"'
+  Select-String -Path logs/sagent.log -Pattern '"trace_id": "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6"'
   ```
 - **LLM 内容记录**：将 `config.yaml` 中 `logging.log_llm_content` 设为 `true` 可记录完整请求/响应（注意体积与敏感信息）
+- **可观测性调试**：observability 模块中的非阻塞异常均通过 `logger.debug(..., exc_info=True)` 记录，开启 DEBUG 级别可排查 Span 属性设置、指标记录、OTLP 导出等静默失败。本地 trace 文件在 `logs/sagent_trace_*.jsonl`，指标文件在 `logs/sagent_metrics_*.jsonl`，均按天滚动。OTLP 导出失败不影响本地导出和 Agent 主流程。
 - **离线调试引擎**：使用 `FakeLLMClient` 构造预设响应序列，可在不调用真实模型的情况下调试 ReAct / Plan 编排逻辑
 - **配置问题**：`LLM_API_KEY` / `LLM_API_URL` 环境变量优先级高于配置文件；缺失 API Key 会抛 `ConfigError`
 - **上下文管理调试**：混合校准的关键日志事件可通过 `event` 字段过滤：
@@ -246,6 +260,7 @@ tests/
 - **新增斜杠命令**：`cli/commands.py` 中的 `parse_command` 为通用纯函数解析器，新增任意 slash command 均复用该解析器，仅需在 `cli/app.py` 的分发逻辑中增加对应分支；解析用例统一并入 `tests/unit/test_cli.py`
 - **MCP 工具接入**：已实现 `sagent.tools.mcp.MCPToolProvider`（实现 `ToolProvider` 接口），通过 `build_mcp_providers(config, session_manager)` 构建提供者列表，逐个调用 `registry.register_provider()` 注册。配置在 `config.yaml` 的 `mcp` 段，支持 stdio/sse/streamable_http 三种传输方式，工具级 allow/deny 过滤与服务器级 enabled 开关，工具名强制 `mcp_{server}_{tool}` 前缀。详见 `tools/mcp/` 子包
 - **新增执行模式**：参考 `ReActEngine` / `PlanEngine` 实现引擎类，在 `cli/app.py` 的 `build_engine()` 中添加分支
+- **可观测性扩展**：基于 OTel SDK，可在 `setup_observability()` 中注册自定义 `SpanProcessor` 或 `MetricReader`。新增 Span 指标派发：在 `metrics.py` 的 `record_span_metrics()` 中按 Span 名称增加分支。OTel SDK（`opentelemetry-api`、`opentelemetry-sdk`、`opentelemetry-exporter-otlp-proto-http`）为必选依赖，安装 `requirements.txt` 即包含全部观测能力
 
 ## 特殊限制
 
