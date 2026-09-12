@@ -11,6 +11,7 @@ import time
 from typing import Any
 
 from ..observability import Span, get_logger
+from ..permissions import PermissionEnforcer
 from .base import Tool, ToolProvider
 
 logger = get_logger(__name__)
@@ -19,8 +20,15 @@ logger = get_logger(__name__)
 class ToolRegistry:
     """工具注册表。"""
 
-    def __init__(self) -> None:
+    def __init__(self, permission: PermissionEnforcer | None = None) -> None:
+        """初始化注册表。
+
+        参数:
+            permission: 可选的权限执行器；非 None 时每次工具执行前统一授权
+                （执行期单点拦截），缺省 None 保持全自动执行（向后兼容）。
+        """
         self._tools: dict[str, Tool] = {}
+        self._permission = permission
 
     def register(self, tool: Tool) -> None:
         """注册单个工具。名称重复时后者覆盖前者。"""
@@ -76,11 +84,6 @@ class ToolRegistry:
         else:
             parsed = arguments
 
-        logger.info(
-            "执行工具",
-            extra={"event": "tool_call", "tool": name, "tool_args": parsed},
-        )
-
         # 校验参数
         try:
             args_model = tool.validate_args(parsed)
@@ -90,6 +93,20 @@ class ToolRegistry:
                 extra={"event": "tool_validate_error", "tool": name},
             )
             return f"错误: 工具 '{name}' 的参数校验失败: {exc}"
+
+        # 权限闸门：参数校验通过后、真正执行前统一授权（单点拦截）；
+        # 被拒时不执行工具，直接把拒绝说明作为结果返回，供引擎作为 tool 观察回写
+        if self._permission is not None:
+            outcome = self._permission.authorize(name, parsed)
+            if not outcome.allowed:
+                return outcome.message
+
+        # 授权通过后才记录 tool_call 日志，保证"tool_call"事件只出现在
+        # 实际进入执行的调用上（被拒绝的调用只产生 permission_decision 审计日志）
+        logger.info(
+            "执行工具",
+            extra={"event": "tool_call", "tool": name, "tool_args": parsed},
+        )
 
         # 执行（添加 Span 埋点）
         with Span("tool.execute") as span:

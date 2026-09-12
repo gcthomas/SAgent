@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import pytest
+from pydantic import ValidationError
 
 from sagent.config.loader import ENV_API_KEY, ENV_API_URL, ConfigError, load_config
+from sagent.config.models import PermissionConfig
 
 
 def _write_config(tmp_path, text: str):
@@ -73,3 +75,44 @@ def test_invalid_top_level_raises(tmp_path):
     path = _write_config(tmp_path, "- just\n- a\n- list\n")
     with pytest.raises(ConfigError):
         load_config(str(path))
+
+
+# ---------- PermissionConfig（权限控制配置） ----------
+
+
+def test_permission_config_defaults():
+    config = PermissionConfig()
+    # 缺省启用权限控制，审批超时 600 秒，非交互默认拒绝
+    assert config.enabled is True
+    assert config.ask_timeout == 600.0
+    assert config.non_interactive == "deny"
+    assert config.allow == []
+    assert config.deny == []
+    assert config.ask == []
+
+
+def test_permission_config_rejects_blank_rule():
+    with pytest.raises(ValidationError):
+        PermissionConfig(allow=["   "])
+
+
+def test_permission_config_rejects_rule_missing_tool():
+    with pytest.raises(ValidationError):
+        PermissionConfig(deny=[":pattern"])
+
+
+def test_permission_config_rejects_invalid_non_interactive():
+    with pytest.raises(ValidationError):
+        PermissionConfig(non_interactive="maybe")
+
+
+def test_permission_config_rejects_negative_ask_timeout():
+    # ask_timeout 必须为非负数
+    with pytest.raises(ValidationError):
+        PermissionConfig(ask_timeout=-1)
+
+
+def test_permission_config_accepts_zero_ask_timeout():
+    # 0 为合法边界值（立即超时，fail-safe 拒绝）
+    config = PermissionConfig(ask_timeout=0)
+    assert config.ask_timeout == 0

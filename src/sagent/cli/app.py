@@ -11,12 +11,21 @@ import sys
 from pathlib import Path
 
 from ..config.loader import ConfigError, load_config
+from ..config.models import PermissionConfig
 from ..context.context_manager import ContextManager
 from ..core.plan_engine import PlanEngine
 from ..core.react_engine import ReActEngine
 from ..llm.client import LLMClient
 from ..memory import MemoryManager, MemoryStore
 from ..observability import Span, close_observability, flush_metrics, get_logger, setup_content_capture, setup_logging, setup_observability
+from ..permissions import (
+    Decision,
+    InteractiveApprovalHandler,
+    PermissionEnforcer,
+    PermissionRule,
+    build_default_policy,
+    parse_rule,
+)
 from ..session.manager import SessionManager
 from ..session.store import SessionStore
 from ..tools import AddMemoryTool, RemoveMemoryTool, ReplaceMemoryTool, build_default_registry
@@ -71,6 +80,43 @@ def build_engine(
     if mode == "plan":
         return PlanEngine(llm, registry, agent_config, on_event=on_event, context_manager=context_manager)
     return ReActEngine(llm, registry, agent_config, on_event=on_event, context_manager=context_manager)
+
+
+def _build_permission(permission_config: PermissionConfig) -> PermissionEnforcer | None:
+    """根据权限配置构建权限执行器。
+
+    组装用户规则（allow / deny / ask 列表），并配置交互审批器的超时与非交互行为。
+    跨列表固定优先级 deny > allow > ask：YAML 三字段无"出现顺序"语义，
+    同一请求同时命中多个列表时拒绝压过放行、放行压过确认；实现上按
+    ask -> allow -> deny 顺序追加规则，借助 last-match-wins 使 deny 生效。
+
+    参数:
+        permission_config: 权限控制配置。
+
+    返回:
+        PermissionEnforcer 实例；未启用权限控制时返回 None（保持全自动执行）。
+    """
+    if not permission_config.enabled:
+        return None
+    rules: list[PermissionRule] = []
+    # 组装顺序 ask -> allow -> deny：策略按 last-match-wins 决策，
+    # 后追加的 deny 规则压过 allow、allow 压过 ask，即跨列表固定优先级
+    for text in permission_config.ask:
+        rules.append(parse_rule(text, Decision.ASK))
+    for text in permission_config.allow:
+        rules.append(parse_rule(text, Decision.ALLOW))
+    for text in permission_config.deny:
+        rules.append(parse_rule(text, Decision.DENY))
+    policy = build_default_policy(rules)
+    approval = InteractiveApprovalHandler()
+    # 审批超时与非交互动作统一经权限执行器注入（构造时透传给交互审批器，
+    # 避免执行器缺省的 non_interactive="deny" 覆盖用户配置）
+    return PermissionEnforcer(
+        policy,
+        approval,
+        timeout=permission_config.ask_timeout,
+        non_interactive=permission_config.non_interactive,
+    )
 
 
 def _dispatch_session_command(parsed: ParsedCommand, session_manager) -> None:
@@ -185,9 +231,10 @@ def run() -> int:
     # 命令行 --mode 覆盖配置中的默认模式
     mode = resolve_mode(args.mode, config.agent.mode)
 
-    # 构建依赖
+    # 构建依赖（权限执行器仅当 permissions.enabled 时注入，未启用时保持全自动执行）
     llm = LLMClient(config.llm)
-    registry = build_default_registry()
+    permission = _build_permission(config.permissions)
+    registry = build_default_registry(permission=permission)
     context_manager = ContextManager(config.context, llm, config.llm.model)
 
     # 构建长期记忆管理器（仅当 memory 启用时）；并向工具表追加三个记忆工具
@@ -253,6 +300,13 @@ def run() -> int:
         mcp_servers = [s.name for s in config.mcp.servers if s.enabled]
         mcp_tool_count = sum(1 for t in registry.list_tools() if t.name.startswith("mcp_"))
         print(f"MCP: 已启用 | 服务器: {', '.join(mcp_servers) or '无'} | 工具: {mcp_tool_count} 个")
+    if permission is not None:
+        print(
+            f"权限控制: 已启用 | 审批超时: {config.permissions.ask_timeout:g} 秒 | "
+            "只读自动放行，写盘/执行类工具需确认（y/n/a），危险命令直接拒绝"
+        )
+    else:
+        print("权限控制: 未启用（工具全自动执行）")
     print("输入你的问题开始对话；输入 exit / quit 退出。")
     print("=" * 60)
 

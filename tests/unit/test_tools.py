@@ -5,6 +5,16 @@ from __future__ import annotations
 import datetime
 import sys
 
+from sagent.permissions import (
+    ApprovalHandler,
+    ConfirmAction,
+    Decision,
+    PermissionEnforcer,
+    PermissionPolicy,
+    PermissionRequest,
+    PermissionRule,
+    build_default_policy,
+)
 from sagent.tools import build_default_registry
 from sagent.tools.file_tools import ReadFileTool, WriteFileTool
 from sagent.tools.registry import ToolRegistry
@@ -101,3 +111,116 @@ def test_run_shell_with_quoted_args():
         result = tool.run(args)
         assert "退出码: 0" in result
         assert "hello world" in result
+
+
+# ---------- 权限拦截（permission 注入） ----------
+
+
+class _DenyAllApproval(ApprovalHandler):
+    """拒绝一切的假审批器：ask 决策会按其结果被拦截。"""
+
+    def approve(self, request: PermissionRequest, policy: PermissionPolicy) -> ConfirmAction:
+        return ConfirmAction.DENIED
+
+
+class _AllowAllApproval(ApprovalHandler):
+    """批准一切的假审批器：ask 决策会按其结果放行。"""
+
+    def approve(self, request: PermissionRequest, policy: PermissionPolicy) -> ConfirmAction:
+        return ConfirmAction.APPROVED
+
+
+def test_registry_permission_denies_dangerous_shell():
+    """默认策略下危险命令直接拒绝，不进入审批也不执行。"""
+    registry = build_default_registry(
+        permission=PermissionEnforcer(build_default_policy(), _DenyAllApproval())
+    )
+    result = registry.execute("run_shell", {"command": "rm -rf /"})
+    assert result.startswith("错误: 工具 'run_shell' 未获用户批准，已拒绝执行")
+
+
+def test_registry_permission_denies_write_without_approval(tmp_path):
+    """默认策略下 write_file 为 ask，审批拒绝时不落盘并返回拒绝说明。"""
+    registry = build_default_registry(
+        permission=PermissionEnforcer(build_default_policy(), _DenyAllApproval())
+    )
+    target = tmp_path / "blocked.txt"
+    result = registry.execute("write_file", {"path": str(target), "content": "x"})
+    assert result.startswith("错误: 工具 'write_file' 未获用户批准，已拒绝执行")
+    # 被拒绝的工具调用不应产生副作用
+    assert not target.exists()
+
+
+def test_registry_permission_allows_write_after_approval(tmp_path):
+    """ask 决策经审批批准后正常执行。"""
+    registry = build_default_registry(
+        permission=PermissionEnforcer(build_default_policy(), _AllowAllApproval())
+    )
+    target = tmp_path / "allowed.txt"
+    registry.execute("write_file", {"path": str(target), "content": "x"})
+    # write_file 放行后，read_file 按内置默认 allow 自动放行
+    assert registry.execute("read_file", {"path": str(target)}) == "x"
+
+
+def test_registry_permission_user_deny_rule_blocks_read(tmp_path):
+    """用户 deny 规则可拒绝内置默认放行的只读工具。"""
+    policy = build_default_policy(
+        [PermissionRule(tool="read_file", pattern=None, decision=Decision.DENY)]
+    )
+    registry = build_default_registry(
+        permission=PermissionEnforcer(policy, _AllowAllApproval())
+    )
+    result = registry.execute("read_file", {"path": str(tmp_path / "any.txt")})
+    assert result.startswith("错误: 工具 'read_file' 未获用户批准，已拒绝执行")
+
+
+def test_registry_direct_construction_with_permission(tmp_path):
+    """ToolRegistry 直接构造时同样支持注入权限执行器。"""
+    registry = ToolRegistry(
+        permission=PermissionEnforcer(build_default_policy(), _DenyAllApproval())
+    )
+    registry.register(ReadFileTool())
+    registry.register(WriteFileTool())
+    target = tmp_path / "direct.txt"
+    result = registry.execute("write_file", {"path": str(target), "content": "x"})
+    assert result.startswith("错误: 工具 'write_file' 未获用户批准，已拒绝执行")
+    assert not target.exists()
+
+
+def test_registry_permission_none_keeps_automatic_execution():
+    """未注入权限执行器时保持旧行为：工具全自动执行。"""
+    registry = build_default_registry()
+    result = registry.execute("run_shell", {"command": "echo ok"})
+    assert "退出码: 0" in result
+
+
+def test_registry_denied_call_skips_tool_call_event(caplog):
+    """被权限拒绝的调用不产生 tool_call 事件，只产生 permission_decision 审计。"""
+    import logging
+
+    caplog.set_level(logging.INFO, logger="sagent.tools.registry")
+    caplog.set_level(logging.INFO, logger="sagent.permissions.enforcer")
+    registry = build_default_registry(
+        permission=PermissionEnforcer(build_default_policy(), _DenyAllApproval())
+    )
+    result = registry.execute("write_file", {"path": "blocked.txt", "content": "x"})
+    assert result.startswith("错误: 工具 'write_file' 未获用户批准，已拒绝执行")
+    tool_call_events = [r for r in caplog.records if getattr(r, "event", None) == "tool_call"]
+    assert tool_call_events == []
+
+
+def test_registry_allowed_call_logs_tool_call_after_permission(caplog):
+    """放行的调用在权限决策之后记录 tool_call 事件。"""
+    import logging
+
+    caplog.set_level(logging.INFO, logger="sagent.tools.registry")
+    caplog.set_level(logging.INFO, logger="sagent.permissions.enforcer")
+    registry = build_default_registry(
+        permission=PermissionEnforcer(build_default_policy(), _AllowAllApproval())
+    )
+    registry.execute("write_file", {"path": "allowed_log.txt", "content": "x"})
+    events = [getattr(r, "event", None) for r in caplog.records]
+    # tool_call 出现在 permission_decision 之后，且确有两条事件
+    assert "permission_decision" in events
+    assert "tool_call" in events
+    assert events.index("permission_decision") < events.index("tool_call")

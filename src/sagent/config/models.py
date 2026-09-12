@@ -214,6 +214,45 @@ class ObservabilityConfig(BaseModel):
     enable_openai_auto_instrumentation: bool = Field(default=False, description="是否启用 OpenAI SDK 自动埋点（实验性，默认关闭）")
 
 
+class PermissionConfig(BaseModel):
+    """工具调用权限控制配置。
+
+    控制执行期权限闸门：三态决策（allow / ask / deny）与审批行为，以及
+    覆盖内置默认规则的用户规则列表。规则格式为 "工具名" 或 "工具名:参数模式"
+    （fnmatch 通配，如 "run_shell:git push*"），同一请求命中多条规则时最后
+    一条生效（last-match-wins），用户显式 allow 可覆盖内置 deny。
+    """
+
+    # 是否启用权限控制（关闭后工具全自动执行，回到旧行为）
+    enabled: bool = Field(default=True, description="是否启用工具调用权限控制")
+    # 审批等待超时（秒），超时按 fail-safe 默认拒绝；缺省 600 秒对齐业界询问等待尺度
+    ask_timeout: float = Field(
+        default=600.0, ge=0, description="审批等待超时（秒），超时默认拒绝（fail-safe），须为非负数"
+    )
+    # 非交互终端（无 TTY）或审批超时时的动作：deny 默认拒绝 / allow 显式放行
+    non_interactive: Literal["deny", "allow"] = Field(
+        default="deny", description="非交互终端或审批超时时的动作"
+    )
+    # 放行规则列表（工具名或 "工具名:参数模式"）
+    allow: list[str] = Field(default_factory=list, description="放行规则列表")
+    # 拒绝规则列表
+    deny: list[str] = Field(default_factory=list, description="拒绝规则列表")
+    # 需确认规则列表
+    ask: list[str] = Field(default_factory=list, description="需确认规则列表")
+
+    @model_validator(mode="after")
+    def validate_rules(self) -> PermissionConfig:
+        """校验规则列表格式："工具名" 或 "工具名:参数模式"，工具名非空。"""
+        for texts in (self.allow, self.deny, self.ask):
+            for text in texts:
+                stripped = text.strip()
+                if not stripped or not stripped.partition(":")[0].strip():
+                    raise ValueError(
+                        f"权限规则格式非法: {text!r}，应为 \"工具名\" 或 \"工具名:参数模式\""
+                    )
+        return self
+
+
 class AppConfig(BaseModel):
     """应用总配置。"""
 
@@ -225,3 +264,4 @@ class AppConfig(BaseModel):
     memory: MemoryConfig = Field(default_factory=MemoryConfig, description="长期记忆配置")
     mcp: MCPConfig = Field(default_factory=MCPConfig, description="MCP 配置")
     observability: ObservabilityConfig = Field(default_factory=ObservabilityConfig, description="可观测性配置")
+    permissions: PermissionConfig = Field(default_factory=PermissionConfig, description="权限控制配置")

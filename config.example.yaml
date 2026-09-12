@@ -189,3 +189,31 @@ observability:
   # 是否启用 OpenAI SDK 自动埋点（实验性，默认关闭）
   # 首期禁止与手动 gen_ai.chat Span 同时启用，配置为 true 时仅记录警告日志
   enable_openai_auto_instrumentation: false
+
+# 工具调用权限控制配置（可选，缺省时使用默认值）
+# 启用后工具执行前经权限闸门统一授权（单点拦截，引擎零改动）：
+# - 只读工具（read_file / 记忆工具 / mcp_*）自动放行
+# - 写盘与执行类工具（write_file / run_shell 等）需用户确认（y/n/a）
+# - run_shell 命中跨平台危险命令清单（Linux shell 与 PowerShell）直接拒绝
+# 规则格式为 "工具名" 或 "工具名:参数模式"（fnmatch 通配，如 "run_shell:git push*"）
+# 用户规则优先于内置默认，用户显式 allow 可覆盖内置 ask/deny（视为明确授权）
+# 跨列表固定优先级 deny > allow > ask：同一请求同时命中多个列表时，拒绝压过放行、放行压过确认
+# 同一列表内按书写顺序生效，后写的规则压过先写的（last-match-wins）
+permissions:
+  # 是否启用权限控制（false 时工具全自动执行，回到旧行为）
+  enabled: true
+  # 审批等待超时（秒），超时默认拒绝（fail-safe）；缺省 600 秒（10 分钟）
+  ask_timeout: 600
+  # 非交互终端（无 TTY）或审批超时时的动作：deny（默认拒绝）/ allow（显式放行）
+  non_interactive: "deny"
+  # 放行规则列表（覆盖内置 ask/deny）
+  allow: []
+  # 示例：允许所有 git 查询命令与全部 write_file
+  # allow:
+  #   - "run_shell:git status*"
+  #   - "run_shell:git diff*"
+  #   - "write_file"
+  # 拒绝规则列表
+  deny: []
+  # 需确认规则列表
+  ask: []
