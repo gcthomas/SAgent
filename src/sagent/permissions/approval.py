@@ -11,11 +11,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import sys
-import threading
 from abc import ABC, abstractmethod
 from enum import Enum
 
+from ..terminal_input import TerminalInput
 from .policy import Decision, PermissionPolicy, PermissionRequest, args_to_text
 
 # 参数摘要显示的最大字符数，超出部分截断
@@ -51,12 +52,13 @@ class ApprovalHandler(ABC):
 class InteractiveApprovalHandler(ApprovalHandler):
     """交互式审批器：读取 stdin 的 y / n / a 输入，维护会话级 always-allow 记忆。
 
-    超时通过后台守护线程读取 stdin 实现（跨平台，Windows 无 select-on-stdin）：
-    主线程 join(timeout) 等待；超时后后台线程仍阻塞在 input() 上，
-    进程退出时随 daemon 线程自动回收，不影响主流程。
+    注入的输入实例由调用方管理；独立使用时按需创建并释放输入资源。
     """
 
-    def __init__(self, timeout: float = 600.0, non_interactive: str = "deny") -> None:
+    def __init__(
+        self, timeout: float = 600.0, non_interactive: str = "deny",
+        reader: TerminalInput | None = None,
+    ) -> None:
         """初始化审批器。
 
         参数:
@@ -67,6 +69,7 @@ class InteractiveApprovalHandler(ApprovalHandler):
         """
         self._timeout = timeout
         self._non_interactive = non_interactive
+        self._reader = reader
         # 会话级 always-allow 白名单，键为 (工具名, 参数文本)
         self._always_allow: set[tuple[str, str]] = set()
 
@@ -119,35 +122,31 @@ class InteractiveApprovalHandler(ApprovalHandler):
             print("该工具将执行任意系统命令，请确认命令内容")
         if request.tool == "write_file":
             print("该工具将写入指定文件（默认覆盖已有内容），请确认目标路径")
-        print("批准执行吗? [y] 批准 / [n] 拒绝 / [a] 总是允许(本会话): ", end="", flush=True)
-
-        # 后台守护线程读取 stdin：EOF / 中断以空串标记，供主线程裁决
-        result: list[str] = []
-
-        def _read() -> None:
-            try:
-                result.append(input())
-            except (EOFError, KeyboardInterrupt):
-                result.append("")
-
-        reader = threading.Thread(target=_read, daemon=True)
-        reader.start()
-        reader.join(self._timeout)
-
-        # 超时：后台线程仍阻塞在 input() 上，随 daemon 线程在进程退出时回收
-        if reader.is_alive():
+        prompt = "批准执行吗? [y] 批准 / [n] 拒绝 / [a] 总是允许(本会话): "
+        try:
+            if self._timeout <= 0:
+                raise asyncio.TimeoutError
+            if self._reader is None:
+                with TerminalInput() as reader:
+                    result = reader.read(prompt, timeout=self._timeout)
+            else:
+                result = self._reader.read(prompt, timeout=self._timeout)
+        except (EOFError, KeyboardInterrupt):
+            print("（输入中断，已拒绝）")
+            return ConfirmAction.DENIED
+        except asyncio.TimeoutError:
             if self._non_interactive == "allow":
                 print(f"\n（审批等待超过 {self._timeout} 秒，已按配置放行）")
                 return ConfirmAction.APPROVED
             print(f"\n（审批等待超过 {self._timeout} 秒，默认拒绝）")
             return ConfirmAction.TIMED_OUT
 
-        # EOF / 中断：以空串标记，默认拒绝（fail-safe）
-        if not result or not result[0]:
+        # 空输入默认拒绝（fail-safe）
+        if not result:
             print("（输入中断，已拒绝）")
             return ConfirmAction.DENIED
 
-        answer = result[0].strip().lower()
+        answer = result.strip().lower()
         if answer == "y":
             return ConfirmAction.APPROVED
         if answer == "n":

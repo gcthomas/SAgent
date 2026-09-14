@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 import sys
-import threading
+import asyncio
 
 import pytest
 
@@ -284,9 +284,32 @@ class _FakeNonTtyStdin:
         return False
 
 
-def _patch_input(monkeypatch, answer: str) -> None:
-    """把 builtins.input 替换为固定返回 answer 的函数。"""
-    monkeypatch.setattr("builtins.input", lambda prompt="": answer)
+class FakeReader:
+    """预设输入或异常，记录读取与释放情况。"""
+
+    def __init__(self, answer="y"):
+        self.answer = answer
+        self.calls = []
+        self.closed = False
+
+    def read(self, prompt, timeout=None):
+        self.calls.append((prompt, timeout))
+        if isinstance(self.answer, BaseException):
+            raise self.answer
+        return self.answer
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.closed = True
+
+
+def _patch_input(monkeypatch, answer):
+    """替换独立审批按需创建的输入实例。"""
+    reader = FakeReader(answer)
+    monkeypatch.setattr("sagent.permissions.approval.TerminalInput", lambda: reader)
+    return reader
 
 
 def _patch_tty(monkeypatch) -> None:
@@ -323,10 +346,7 @@ def test_approve_always_then_memory_hit(monkeypatch):
     assert handler.approve(request, policy) is ConfirmAction.ALLOWED_ALWAYS
 
     # 第二次相同请求命中会话级白名单：直接放行且不再读取输入
-    def _never_called(prompt: str = "") -> str:
-        raise AssertionError("白名单命中时不应再次询问")
-
-    monkeypatch.setattr("builtins.input", _never_called)
+    _patch_input(monkeypatch, AssertionError("白名单命中时不应再次询问"))
     assert handler.approve(request, policy) is ConfirmAction.ALLOWED_ALWAYS
 
 
@@ -341,10 +361,7 @@ def test_approve_eof_denied(monkeypatch):
     handler = InteractiveApprovalHandler()
     _patch_tty(monkeypatch)
 
-    def _raise_eof(prompt: str = "") -> str:
-        raise EOFError
-
-    monkeypatch.setattr("builtins.input", _raise_eof)
+    _patch_input(monkeypatch, EOFError())
     assert handler.approve(_write_file_request(), build_default_policy()) is ConfirmAction.DENIED
 
 
@@ -352,10 +369,7 @@ def test_approve_keyboard_interrupt_denied(monkeypatch):
     handler = InteractiveApprovalHandler()
     _patch_tty(monkeypatch)
 
-    def _raise_interrupt(prompt: str = "") -> str:
-        raise KeyboardInterrupt
-
-    monkeypatch.setattr("builtins.input", _raise_interrupt)
+    _patch_input(monkeypatch, KeyboardInterrupt())
     assert handler.approve(_write_file_request(), build_default_policy()) is ConfirmAction.DENIED
 
 
@@ -381,34 +395,18 @@ def test_approve_non_tty_allow_config(monkeypatch):
 def test_approve_timeout_denied(monkeypatch):
     handler = InteractiveApprovalHandler(timeout=0.1)
     _patch_tty(monkeypatch)
-    release = threading.Event()
-
-    def _blocking_input(prompt: str = "") -> str:
-        release.wait(10)
-        return "y"
-
-    monkeypatch.setattr("builtins.input", _blocking_input)
-    try:
-        assert handler.approve(_write_file_request(), build_default_policy()) is ConfirmAction.TIMED_OUT
-    finally:
-        # 释放后台读取线程，避免其滞留整个测试会话
-        release.set()
+    reader = _patch_input(monkeypatch, asyncio.TimeoutError())
+    assert handler.approve(_write_file_request(), build_default_policy()) is ConfirmAction.TIMED_OUT
+    assert reader.closed
+    assert reader.calls[0][1] == 0.1
 
 
 def test_approve_timeout_allow_config(monkeypatch):
     handler = InteractiveApprovalHandler(timeout=0.1, non_interactive="allow")
     _patch_tty(monkeypatch)
-    release = threading.Event()
-
-    def _blocking_input(prompt: str = "") -> str:
-        release.wait(10)
-        return "y"
-
-    monkeypatch.setattr("builtins.input", _blocking_input)
-    try:
-        assert handler.approve(_write_file_request(), build_default_policy()) is ConfirmAction.APPROVED
-    finally:
-        release.set()
+    reader = _patch_input(monkeypatch, asyncio.TimeoutError())
+    assert handler.approve(_write_file_request(), build_default_policy()) is ConfirmAction.APPROVED
+    assert reader.closed
 
 
 def test_configure_updates_settings():

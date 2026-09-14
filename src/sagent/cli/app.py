@@ -11,7 +11,7 @@ import sys
 from pathlib import Path
 
 from ..config.loader import ConfigError, load_config
-from ..config.models import PermissionConfig
+from ..config.models import AppConfig, PermissionConfig
 from ..context.context_manager import ContextManager
 from ..core.plan_engine import PlanEngine
 from ..core.react_engine import ReActEngine
@@ -28,6 +28,7 @@ from ..permissions import (
 )
 from ..session.manager import SessionManager
 from ..session.store import SessionStore
+from ..terminal_input import TerminalInput
 from ..tools import AddMemoryTool, RemoveMemoryTool, ReplaceMemoryTool, build_default_registry
 from ..tools.mcp import MCPSessionManager, build_mcp_providers
 from .commands import ParsedCommand, parse_command
@@ -82,7 +83,9 @@ def build_engine(
     return ReActEngine(llm, registry, agent_config, on_event=on_event, context_manager=context_manager)
 
 
-def _build_permission(permission_config: PermissionConfig) -> PermissionEnforcer | None:
+def _build_permission(
+    permission_config: PermissionConfig, reader: TerminalInput | None = None,
+) -> PermissionEnforcer | None:
     """根据权限配置构建权限执行器。
 
     组装用户规则（allow / deny / ask 列表），并配置交互审批器的超时与非交互行为。
@@ -108,7 +111,7 @@ def _build_permission(permission_config: PermissionConfig) -> PermissionEnforcer
     for text in permission_config.deny:
         rules.append(parse_rule(text, Decision.DENY))
     policy = build_default_policy(rules)
-    approval = InteractiveApprovalHandler()
+    approval = InteractiveApprovalHandler(reader=reader)
     # 审批超时与非交互动作统一经权限执行器注入（构造时透传给交互审批器，
     # 避免执行器缺省的 non_interactive="deny" 覆盖用户配置）
     return PermissionEnforcer(
@@ -231,9 +234,15 @@ def run() -> int:
     # 命令行 --mode 覆盖配置中的默认模式
     mode = resolve_mode(args.mode, config.agent.mode)
 
+    with TerminalInput() as reader:
+        return _run_interactive(config, mode, reader)
+
+
+def _run_interactive(config: AppConfig, mode: str, reader: TerminalInput) -> int:
+    """使用入口持有的共享输入构建依赖并运行交互循环。"""
     # 构建依赖（权限执行器仅当 permissions.enabled 时注入，未启用时保持全自动执行）
     llm = LLMClient(config.llm)
-    permission = _build_permission(config.permissions)
+    permission = _build_permission(config.permissions, reader=reader)
     registry = build_default_registry(permission=permission)
     context_manager = ContextManager(config.context, llm, config.llm.model)
 
@@ -313,7 +322,7 @@ def run() -> int:
     # 交互循环
     while True:
         try:
-            user_input = input("\n你 > ").strip()
+            user_input = reader.read("\n你 > ").strip()
         except (EOFError, KeyboardInterrupt):
             if session_manager is not None and config.session.auto_save:
                 try:
