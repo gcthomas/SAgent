@@ -113,6 +113,36 @@ def test_run_shell_with_quoted_args():
         assert "hello world" in result
 
 
+def test_run_shell_chinese_output_decodes_utf8():
+    """Windows 上 PowerShell 中文输出应正确显示，不出现乱码。"""
+    if sys.platform != "win32":
+        return
+    tool = ShellTool()
+    result = tool.run(ShellArgs(command="Write-Output 中文测试"))
+    assert "退出码: 0" in result
+    assert "中文测试" in result
+
+
+def test_run_shell_error_strips_clixml():
+    """Windows PowerShell 重定向错误流时不应返回 CLIXML 序列化文本。"""
+    if sys.platform != "win32":
+        return
+    tool = ShellTool()
+    result = tool.run(ShellArgs(command="Write-Error 出错了"))
+    assert "#< CLIXML" not in result
+    assert "出错了" in result
+
+
+def test_run_shell_suppresses_progress_clixml():
+    """Windows PowerShell 的进度记录不应以 CLIXML 噪音返回。"""
+    if sys.platform != "win32":
+        return
+    tool = ShellTool()
+    result = tool.run(ShellArgs(command="Write-Progress -Activity test; Write-Output done"))
+    assert "#< CLIXML" not in result
+    assert "done" in result
+
+
 # ---------- 权限拦截（permission 注入） ----------
 
 
