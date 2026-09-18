@@ -61,7 +61,7 @@ def test_truncation_non_tool_message_unchanged():
 
 
 def test_offload_old_tool_messages_replaced():
-    """旧的 assistant(tool_calls) 的 tool_calls 被移除并替换为摘要，旧 tool 消息 content 被替换为卸载标记。"""
+    """旧的 assistant(tool_calls) 被替换为摘要，对应 tool 结果消息被删除（避免孤儿 tool 消息）。"""
     messages = [
         {"role": "system", "content": "系统提示"},
         {
@@ -85,15 +85,16 @@ def test_offload_old_tool_messages_replaced():
     assert "tool_calls" not in result[1]
     assert "已压缩" in result[1]["content"]
 
-    # 第三条 tool 的 content 被替换为卸载标记
-    assert result[2]["role"] == "tool"
-    assert "已卸载" in result[2]["content"]
+    # 卸载后不保留任何 role="tool" 的消息：父消息的 tool_calls 已被移除，
+    # 保留会形成孤儿 tool 消息，导致严格端点返回 400
+    assert len(result) == 4
+    assert all(m.get("role") != "tool" for m in result)
 
     # 最后两条不受影响
-    assert result[3]["role"] == "user"
-    assert result[3]["content"] == "继续"
-    assert result[4]["role"] == "assistant"
-    assert result[4]["content"] == "好的"
+    assert result[2]["role"] == "user"
+    assert result[2]["content"] == "继续"
+    assert result[3]["role"] == "assistant"
+    assert result[3]["content"] == "好的"
 
 
 def test_offload_recent_tool_messages_preserved():
@@ -256,3 +257,103 @@ def test_summary_compress_replaces_old_messages(make_fake_llm):
     assert result[2]["content"] == "第二个问题"
     assert result[3]["role"] == "assistant"
     assert result[3]["content"] == "第二个回答"
+
+
+def _assert_no_orphan_tool_messages(messages: list[dict]) -> None:
+    """孤儿校验器：每条 tool 消息的 tool_call_id 必须能在前序 assistant(tool_calls) 中找到。"""
+    pending_ids: set[str] = set()
+    for msg in messages:
+        if msg.get("role") == "assistant" and msg.get("tool_calls"):
+            for tc in msg["tool_calls"]:
+                if isinstance(tc, dict) and tc.get("id"):
+                    pending_ids.add(tc["id"])
+        elif msg.get("role") == "tool":
+            assert msg.get("tool_call_id") in pending_ids, (
+                f"孤儿 tool 消息: tool_call_id={msg.get('tool_call_id')} 无对应父 assistant(tool_calls)"
+            )
+
+
+def test_summary_compress_aligns_tool_pair_boundary(make_fake_llm):
+    """切点落在 tool 结果上时，compress 向前对齐到父 assistant(tool_calls)，不产生孤儿 tool 消息。"""
+    llm = make_fake_llm([text_response("旧消息摘要")])
+    strategy = LLMSummaryCompression(llm, summary_max_tokens=500, keep_recent=2)
+    messages = [
+        {"role": "system", "content": "系统提示"},
+        {"role": "user", "content": "问题一"},
+        {"role": "user", "content": "问题二"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [make_tool_call("read_file", {"path": "/tmp/a.txt"})],
+        },
+        {"role": "tool", "tool_call_id": "call_read_file", "content": "文件内容"},
+        {"role": "user", "content": "继续"},
+    ]
+    # body 为 [user, user, assistant(tool_calls), tool, user]，keep_recent=2
+    # 初始切点落在 tool(call_read_file) 上，应对齐到其父 assistant(tool_calls)
+    result = strategy.compress(messages)
+
+    # system + 摘要 + 对齐后的 recent（assistant + tool + user）
+    assert len(result) == 5
+    assert result[0]["role"] == "system"
+    assert result[0]["content"] == "系统提示"
+    assert result[1]["role"] == "system"
+    assert "旧消息摘要" in result[1]["content"]
+
+    # 摘要后首条 body 消息是含 tool_calls 的 assistant，其 tool 结果紧随
+    assert result[2]["role"] == "assistant"
+    assert result[2].get("tool_calls") is not None
+    assert result[3]["role"] == "tool"
+    assert result[3]["tool_call_id"] == "call_read_file"
+
+    _assert_no_orphan_tool_messages(result)
+
+
+def test_summary_renders_tool_calls_and_tool_result_budget(make_fake_llm):
+    """summarize 渲染 assistant 的 tool_calls（工具名/参数），tool 结果使用更大预览预算。"""
+    llm = make_fake_llm([text_response("摘要")])
+    strategy = LLMSummaryCompression(llm, summary_max_tokens=500)
+    tool_result = "数" * 300  # 超过文本预算 200，但未超过 tool 结果预算 500
+    old_messages = [
+        {"role": "user", "content": "读取文件"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [make_tool_call("read_file", {"path": "/tmp/a.txt"})],
+        },
+        {"role": "tool", "tool_call_id": "call_read_file", "content": tool_result},
+    ]
+    strategy.summarize(old_messages)
+
+    user_content = llm.calls[0]["messages"][1]["content"]
+    # 工具名与参数（含文件路径）被渲染进摘要输入
+    assert "read_file" in user_content
+    assert "/tmp/a.txt" in user_content
+    # tool 结果 300 字符未超过 500 字符预算，应完整保留
+    assert tool_result in user_content
+
+
+def test_summary_system_prompt_structured(make_fake_llm):
+    """摘要 system 提示词包含结构化分段标记与逐字保留要求。"""
+    llm = make_fake_llm([text_response("摘要")])
+    strategy = LLMSummaryCompression(llm, summary_max_tokens=500)
+    strategy.summarize([{"role": "user", "content": "你好"}])
+
+    system_content = llm.calls[0]["messages"][0]["content"]
+    assert "[用户目标]" in system_content
+    assert "[已完成动作与结果]" in system_content
+    assert "逐字保留" in system_content
+
+
+def test_summary_truncated_to_token_limit(make_fake_llm):
+    """LLM 返回超长摘要时，被硬校验截断至 summary_max_tokens 以内。"""
+    long_summary = "摘" * 2000
+    llm = make_fake_llm([text_response(long_summary)])
+    strategy = LLMSummaryCompression(llm, summary_max_tokens=50)
+    result = strategy.summarize([{"role": "user", "content": "你好"}])
+
+    # 包含截断标记，且比原文短
+    assert "已截断" in result
+    assert len(result) < len(long_summary)
+    # 与实现使用相同的 token 计数方式，截断后不超过上限
+    assert count_text_tokens(result, "", "auto") <= 50

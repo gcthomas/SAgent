@@ -21,6 +21,10 @@ from .token_counter import count_text_tokens
 
 logger = get_logger(__name__)
 
+# 摘要输入中各角色消息的预览字符预算
+_TEXT_PREVIEW_CHARS = 200  # user/assistant/system 普通文本
+_TOOL_RESULT_PREVIEW_CHARS = 500  # tool 结果（承载事实输出，预算更大）
+
 
 class CompressionStrategy(ABC):
     """压缩策略抽象基类。
@@ -161,7 +165,8 @@ class ToolMessageOffload(CompressionStrategy):
     """第二层：工具消息卸载。
 
     识别已过期的工具消息对（assistant 含 tool_calls + 紧跟的 tool 结果），
-    将这些过期消息替换为简短摘要，移除原始 tool_calls 与长结果。
+    将过期对的 assistant 替换为简短摘要（移除 tool_calls），并删除对应的
+    tool 结果消息（父消息 tool_calls 已移除，保留会形成孤儿 tool 消息）。
     """
 
     def __init__(self, keep_recent: int) -> None:
@@ -234,16 +239,9 @@ class ToolMessageOffload(CompressionStrategy):
                 offloaded_assistant.pop("tool_calls", None)
                 result.append(offloaded_assistant)
 
-                # 卸载对应的 tool 结果消息
-                for tr in tool_results:
-                    tool_id = tr.get("tool_call_id", "")
-                    tool_content = tr.get("content") or ""
-                    offloaded_tool = dict(tr)
-                    offloaded_tool["content"] = (
-                        f"[已卸载: 工具结果，原始 {len(tool_content)} 字符]"
-                    )
-                    result.append(offloaded_tool)
-
+                # 不保留对应的 tool 结果消息：父消息的 tool_calls 已被移除，
+                # 保留 role="tool" 的消息会形成孤儿 tool 消息，导致严格端点返回 400。
+                # 工具名/参数摘要与结果字符数已包含在上方 assistant 占位文本中。
                 idx = j
                 logger.debug(
                     "工具消息对已卸载",
@@ -382,11 +380,28 @@ class LLMSummaryCompression(CompressionStrategy):
         for msg in old_messages:
             role = msg.get("role", "unknown")
             content = msg.get("content") or ""
-            # 每条消息内容截取前 200 字符
-            preview = content[:200]
-            if len(content) > 200:
+            # 角色差异化预览预算：tool 结果承载事实输出，保留更长预览
+            budget = _TOOL_RESULT_PREVIEW_CHARS if role == "tool" else _TEXT_PREVIEW_CHARS
+            preview = content[:budget]
+            if len(content) > budget:
                 preview += "..."
             lines.append(f"[{role}] {preview}")
+            # assistant 的 tool_calls 是关键执行记录（工具名/参数），需呈现给摘要 LLM；
+            # 兼容嵌套（OpenAI 标准）与扁平（conftest.make_tool_call）两种格式，
+            # 与 ToolMessageOffload 的解析方式保持一致
+            if role == "assistant" and msg.get("tool_calls"):
+                for tc in msg["tool_calls"]:
+                    if not isinstance(tc, dict):
+                        continue
+                    func = tc.get("function", {}) if isinstance(tc.get("function"), dict) else {}
+                    name = func.get("name", "") or tc.get("name", "") or ""
+                    args_str = func.get("arguments", "") or tc.get("arguments", "") or ""
+                    if not name:
+                        continue
+                    args_preview = args_str[:_TEXT_PREVIEW_CHARS]
+                    if len(args_str) > _TEXT_PREVIEW_CHARS:
+                        args_preview += "..."
+                    lines.append(f"[assistant 工具调用] {name}({args_preview})")
         formatted_text = "\n".join(lines)
 
         # 构造 LLM 请求消息，将 summary_max_tokens 注入提示词约束摘要长度
@@ -408,6 +423,8 @@ class LLMSummaryCompression(CompressionStrategy):
 
         response = self._llm.chat(llm_messages, tools=None)
         summary = response.content or ""
+        # 硬校验摘要长度：LLM 不遵守提示词约束时按比例截断
+        summary = self._enforce_summary_limit(summary)
         logger.info(
             "摘要压缩 LLM 响应已接收",
             extra={
@@ -416,6 +433,37 @@ class LLMSummaryCompression(CompressionStrategy):
             },
         )
         return summary
+
+    def _enforce_summary_limit(self, summary: str) -> str:
+        """硬校验摘要长度：超过 summary_max_tokens 时按比例截断。
+
+        参数:
+            summary: LLM 生成的摘要文本
+        返回:
+            满足 token 上限的摘要文本（截断时追加标记）
+        """
+        if not summary:
+            return summary
+        marker = "\n...[摘要已截断至 token 上限]"
+        tokens = count_text_tokens(summary + marker, self._model)
+        if tokens <= self._summary_max_tokens:
+            return summary
+        logger.warning(
+            "摘要超过 token 上限，已截断",
+            extra={
+                "event": "summary_truncated",
+                "summary_max_tokens": self._summary_max_tokens,
+                "original_tokens": tokens,
+            },
+        )
+        # 按 token 占比估算字符保留量，每轮预留 10% 余量，循环收缩直至满足上限
+        while tokens > self._summary_max_tokens and summary:
+            keep_chars = max(1, int(len(summary) * self._summary_max_tokens / tokens * 0.9))
+            summary = summary[:keep_chars]
+            tokens = count_text_tokens(summary + marker, self._model)
+            if keep_chars == 1:
+                break
+        return summary + marker
 
     def compress(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """对消息列表执行 LLM 摘要压缩。
@@ -437,8 +485,14 @@ class LLMSummaryCompression(CompressionStrategy):
         if len(body) <= self._keep_recent:
             return [dict(m) for m in messages]
 
-        recent = body[-self._keep_recent :]
-        old = body[: -self._keep_recent]
+        # 切分边界对齐：若切点落在 tool 结果消息上，向前扩展以包含其
+        # 父 assistant(tool_calls) 消息，避免摘要后残留孤儿 tool 消息
+        cut = max(0, len(body) - self._keep_recent)
+        while cut > 0 and body[cut].get("role") == "tool":
+            cut -= 1
+
+        recent = body[cut:]
+        old = body[:cut]
 
         if not old:
             return [dict(m) for m in messages]

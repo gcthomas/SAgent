@@ -86,14 +86,19 @@ class ContextManager:
         self._messages.append(message)
 
     def get_messages(self) -> list[dict[str, Any]]:
-        """获取当前消息列表。如果 token 超阈值，自动触发压缩后返回。
+        """获取当前消息列表（已剥离内部元数据字段，可直接发送给 LLM）。
+
+        如果 token 超阈值，自动触发压缩后返回。
 
         返回:
-            消息列表的副本
+            消息列表的副本（不含内部字段 seq）
         """
         if self._is_over_threshold():
             self._compress()
-        return list(self._messages)
+        # 剥离内部元数据字段 seq：该字段用于会话持久化（export_new_messages /
+        # load_messages 直接读内部列表，不受影响），不属于 OpenAI 消息格式，
+        # 泄漏到 API 请求会被严格端点拒绝并产生额外计费
+        return [{k: v for k, v in m.items() if k != "seq"} for m in self._messages]
 
     def record_llm_usage(self, usage: dict[str, int] | None) -> None:
         """从 LLM API 响应中记录实际的 prompt token 用量，用于混合校准。
@@ -225,8 +230,13 @@ class ContextManager:
             # 分离旧消息与近期消息
             system_msgs, body = self._split_system_and_body()
             keep_count = self._config.keep_recent_messages
-            recent = body[-keep_count:] if len(body) > keep_count else body
-            old = body[:-keep_count] if len(body) > keep_count else []
+            # 切分边界对齐：若切点落在 tool 结果消息上，向前扩展以包含其
+            # 父 assistant(tool_calls) 消息，避免摘要后残留孤儿 tool 消息
+            cut = max(0, len(body) - keep_count)
+            while cut > 0 and body[cut].get("role") == "tool":
+                cut -= 1
+            recent = body[cut:]
+            old = body[:cut]
 
             if old and self._summarizer is not None:
                 # 第三层：LLM 摘要压缩（先于裁剪执行，保留语义信息）

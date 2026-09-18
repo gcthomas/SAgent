@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from conftest import text_response
+from conftest import make_tool_call, text_response
 from sagent.config.models import ContextConfig
 from sagent.context.context_manager import ContextManager
 
@@ -210,16 +210,21 @@ def test_seq_incremental():
     assert cm._messages[2]["seq"] == 3
 
 
-def test_seq_preserved_in_get_messages():
-    """add 后 get_messages 返回的消息应包含 seq 字段且值正确。"""
+def test_get_messages_strips_internal_seq():
+    """get_messages 返回的消息不含内部字段 seq（可直接发送给 LLM），内部列表仍保留 seq。"""
     config = ContextConfig(max_context_tokens=128000, token_counter_method="heuristic")
     cm = ContextManager(config)
     cm.add_message({"role": "user", "content": "你好"})
     cm.add_message({"role": "user", "content": "世界"})
     msgs = cm.get_messages()
     assert len(msgs) == 2
-    assert msgs[0]["seq"] == 1
-    assert msgs[1]["seq"] == 2
+    # 对外返回的消息不含 seq（seq 不属于 OpenAI 消息格式，泄漏会被严格端点拒绝）
+    assert all("seq" not in m for m in msgs)
+    assert msgs[0]["content"] == "你好"
+    assert msgs[1]["content"] == "世界"
+    # 内部列表仍保留 seq，供会话持久化（export_new_messages / load_messages）使用
+    assert cm._messages[0]["seq"] == 1
+    assert cm._messages[1]["seq"] == 2
 
 
 # ========== export_new_messages 增量导出 ==========
@@ -268,8 +273,8 @@ def test_export_new_messages_returns_copies():
     assert len(exported) == 1
     exported[0]["content"] = "被修改的内容"
     exported[0]["seq"] = 999
-    # 原列表不受影响
-    original = cm.get_messages()
+    # 原列表不受影响（直接读内部列表，其消息含 seq）
+    original = cm._messages
     assert original[0]["content"] == "原始内容"
     assert original[0]["seq"] == 1
 
@@ -427,3 +432,67 @@ def test_compaction_callback_invoked_with_summary_and_seq_range(make_fake_llm):
     assert isinstance(frm, int) and frm >= 1
     assert isinstance(to, int) and to >= 1
     assert frm <= to
+
+
+# ========== 分层压缩后无孤儿 tool 消息 ==========
+
+
+def test_compression_produces_no_orphan_tool_messages(make_fake_llm):
+    """分层压缩后最终消息不含孤儿 tool 消息。
+
+    构造两组 assistant(tool_calls) + tool 消息对并触发压缩：
+    第二层卸载会移除过期对的 tool_calls 并删除对应 tool 结果，
+    第三层摘要替换旧消息，任一环节处理不当都会残留孤儿 tool 消息
+    （父 assistant 的 tool_calls 已被移除，导致严格端点返回 400）。
+    """
+    config = ContextConfig(
+        max_context_tokens=300,
+        compression_threshold=0.7,
+        safe_threshold=0.5,
+        keep_recent_messages=2,
+        enable_summary=True,
+        summary_max_tokens=100,
+        token_counter_method="heuristic",
+    )
+    llm = make_fake_llm([text_response("这是摘要内容")])
+    cm = ContextManager(config, llm=llm, model="")
+    cm.add_message({"role": "system", "content": "你是助手"})
+    cm.add_message({"role": "user", "content": "甲" * 80})
+    cm.add_message(
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [make_tool_call("read_file", {"path": "/tmp/a.txt"})],
+        }
+    )
+    cm.add_message({"role": "tool", "tool_call_id": "call_read_file", "content": "乙" * 80})
+    cm.add_message({"role": "user", "content": "丙" * 80})
+    cm.add_message(
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [make_tool_call("search", {"query": "关键词"})],
+        }
+    )
+    cm.add_message({"role": "tool", "tool_call_id": "call_search", "content": "丁" * 80})
+    cm.add_message({"role": "user", "content": "戊" * 80})
+
+    # 超过触发阈值 0.7 * 300 = 210
+    assert cm.token_count > 210
+    msgs = cm.get_messages()  # 触发分层压缩
+
+    # 消息数减少
+    assert len(msgs) < 8
+    # 第三层摘要压缩已执行，历史摘要已生成
+    assert cm._existing_summary is not None
+    # 孤儿校验：每条 tool 消息的 tool_call_id 必须能在前序 assistant(tool_calls) 中找到
+    pending_ids: set[str] = set()
+    for msg in msgs:
+        if msg.get("role") == "assistant" and msg.get("tool_calls"):
+            for tc in msg["tool_calls"]:
+                if isinstance(tc, dict) and tc.get("id"):
+                    pending_ids.add(tc["id"])
+        elif msg.get("role") == "tool":
+            assert msg.get("tool_call_id") in pending_ids, (
+                f"孤儿 tool 消息: tool_call_id={msg.get('tool_call_id')} 无对应父 assistant(tool_calls)"
+            )

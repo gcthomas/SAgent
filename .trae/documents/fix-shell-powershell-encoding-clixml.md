@@ -13,8 +13,8 @@
 
 相关文件：
 
-- [shell_tool.py](file:///d:/myworkspaces/SAgent/src/sagent/tools/shell_tool.py#L35-L75)：`ShellTool.run` 在 Windows 分支将命令用 UTF-16LE 编码后 Base64 编码，再传给 `powershell -EncodedCommand`；捕获输出后直接拼接 `标准输出` / `标准错误`。
-- [test_tools.py](file:///d:/myworkspaces/SAgent/tests/unit/test_tools.py#L98-L113)：现有 `test_run_shell_with_quoted_args` 只覆盖 ASCII 输出，未覆盖中文与错误流。
+- [shell_tool.py](src/sagent/tools/shell_tool.py#L35-L75)：`ShellTool.run` 在 Windows 分支将命令用 UTF-16LE 编码后 Base64 编码，再传给 `powershell -EncodedCommand`；捕获输出后直接拼接 `标准输出` / `标准错误`。
+- [test_tools.py](tests/unit/test_tools.py#L98-L113)：现有 `test_run_shell_with_quoted_args` 只覆盖 ASCII 输出，未覆盖中文与错误流。
 
 已通过本机实测确认：
 
@@ -26,7 +26,7 @@
 
 ## 改动方案
 
-### 1. 修改 [shell_tool.py](file:///d:/myworkspaces/SAgent/src/sagent/tools/shell_tool.py)
+### 1. 修改 [shell_tool.py](src/sagent/tools/shell_tool.py)
 
 #### 1.1 新增导入
 
@@ -86,7 +86,7 @@ def _decode_clixml(stderr: str) -> str:
 
 #### 1.4 修改 Windows 分支
 
-将 [当前 Windows 分支](file:///d:/myworkspaces/SAgent/src/sagent/tools/shell_tool.py#L37-L48) 中构造命令与编码部分改为在用户命令前拼接 `_PS_PREAMBLE`：
+将 [当前 Windows 分支](src/sagent/tools/shell_tool.py#L37-L48) 中构造命令与编码部分改为在用户命令前拼接 `_PS_PREAMBLE`：
 
 ```python
 if sys.platform == "win32":
@@ -107,14 +107,14 @@ if sys.platform == "win32":
 
 #### 1.5 修改标准错误后处理
 
-将 [当前 stderr 计算处](file:///d:/myworkspaces/SAgent/src/sagent/tools/shell_tool.py#L63-L64) 改为先解码 CLIXML：
+将 [当前 stderr 计算处](src/sagent/tools/shell_tool.py#L63-L64) 改为先解码 CLIXML：
 
 ```python
 stdout = (completed.stdout or "").strip()
 stderr = _decode_clixml((completed.stderr or "").strip())
 ```
 
-### 2. 补充测试 [test_tools.py](file:///d:/myworkspaces/SAgent/tests/unit/test_tools.py)
+### 2. 补充测试 [test_tools.py](tests/unit/test_tools.py)
 
 在 `test_run_shell_with_quoted_args` 之后新增三个用例（仅 Windows 生效）：
 
