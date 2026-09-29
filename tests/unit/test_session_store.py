@@ -114,6 +114,27 @@ def test_list_sessions_ordered_by_updated_at_desc(store):
     assert sessions[2].id == "s1"
 
 
+def test_list_sessions_limit_and_offset(store):
+    """限制返回数量，并按偏移读取下一页。"""
+    for index in range(1, 5):
+        meta = _make_meta(id=f"s{index}")
+        meta.updated_at = f"2026-01-0{index}T00:00:00"
+        store.create_session(meta)
+
+    assert [s.id for s in store.list_sessions(limit=2)] == ["s4", "s3"]
+    assert [s.id for s in store.list_sessions(limit=2, offset=2)] == ["s2", "s1"]
+    assert store.list_sessions(limit=2, offset=4) == []
+
+
+def test_list_sessions_same_updated_at_ordered_by_id_desc(store):
+    """更新时间相同时按 id 降序稳定排序。"""
+    for session_id in ("s1", "s3", "s2"):
+        store.create_session(_make_meta(id=session_id))
+
+    assert [s.id for s in store.list_sessions()] == ["s3", "s2", "s1"]
+    assert [s.id for s in store.list_sessions(limit=1, offset=1)] == ["s2"]
+
+
 def test_rename_session(store):
     """rename_session 后 get_session 返回新标题与更新时间。"""
     meta = _make_meta()

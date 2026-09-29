@@ -8,8 +8,11 @@ from __future__ import annotations
 
 import sys
 
-from sagent.cli.app import _build_parser, _build_permission, build_engine, resolve_mode
-from sagent.cli.commands import parse_command
+import pytest
+
+from sagent.cli.app import _build_parser, _build_permission, _dispatch_session_command, build_engine, resolve_mode
+from sagent.cli.commands import ParsedCommand, parse_command
+from sagent.session.models import SessionMeta
 from sagent.config.models import AgentConfig, PermissionConfig
 from sagent.core.plan_engine import PlanEngine
 from sagent.core.react_engine import ReActEngine
@@ -30,8 +33,6 @@ def test_parser_parses_mode_and_config():
 
 
 def test_parser_rejects_invalid_mode():
-    import pytest
-
     with pytest.raises(SystemExit):
         _build_parser().parse_args(["--mode", "invalid"])
 
@@ -58,6 +59,81 @@ def test_build_engine_plan():
         "plan", llm=None, registry=build_default_registry(), agent_config=AgentConfig()
     )
     assert isinstance(engine, PlanEngine)
+
+
+def _make_session(session_id: str) -> SessionMeta:
+    """构造会话列表测试数据。"""
+    return SessionMeta(
+        id=session_id,
+        title=f"标题-{session_id}",
+        created_at="2026-01-01T00:00:00",
+        updated_at="2026-01-01T00:00:00",
+        mode="react",
+        message_count=1,
+        persisted_seq=1,
+    )
+
+
+class _FakeSessionManager:
+    """记录分页参数并提供当前会话的轻量会话管理器。"""
+
+    def __init__(self, sessions: list[SessionMeta], current_id: str | None = None):
+        self.sessions = sessions
+        self.current_id = current_id
+        self.calls: list[tuple[int | None, int]] = []
+
+    def list_sessions(self, limit: int | None = None, offset: int = 0):
+        self.calls.append((limit, offset))
+        return self.sessions
+
+    def get_current_session(self):
+        return next((s for s in self.sessions if s.id == self.current_id), None)
+
+
+def test_dispatch_sessions_default_pagination(capsys):
+    """默认每页 20 条，查询多一条并提示下一页。"""
+    manager = _FakeSessionManager([_make_session(f"s{i}") for i in range(21)], current_id="s0")
+
+    _dispatch_session_command(ParsedCommand("sessions", []), manager)
+
+    output = capsys.readouterr().out
+    assert manager.calls == [(21, 0)]
+    assert output.count("| 标题-") == 20
+    assert "* s0" in output
+    assert "还有更多会话，可使用 /sessions 20 2 查看下一页" in output
+
+
+def test_dispatch_sessions_page_pagination(capsys):
+    """指定页码时传入正确的查询数量与偏移，并提示上下页。"""
+    manager = _FakeSessionManager([_make_session(f"s{i}") for i in range(6)])
+
+    _dispatch_session_command(ParsedCommand("sessions", ["5", "2"]), manager)
+
+    output = capsys.readouterr().out
+    assert manager.calls == [(6, 5)]
+    assert output.count("| 标题-") == 5
+    assert "上一页: /sessions 5 1" in output
+    assert "还有更多会话，可使用 /sessions 5 3 查看下一页" in output
+
+
+def test_dispatch_sessions_invalid_args_do_not_query(capsys):
+    """无效参数或参数过多时只输出用法，不查询会话。"""
+    for args in (["abc"], ["0"], ["5", "0"], ["1", "2", "3"]):
+        manager = _FakeSessionManager([])
+        _dispatch_session_command(ParsedCommand("sessions", args), manager)
+        output = capsys.readouterr().out
+        assert "用法: /sessions [每页数量] [页码]（默认每页 20 条）" in output
+        assert manager.calls == []
+
+
+def test_dispatch_sessions_empty_result(capsys):
+    """空结果保持暂无会话提示。"""
+    manager = _FakeSessionManager([])
+
+    _dispatch_session_command(ParsedCommand("sessions", []), manager)
+
+    assert capsys.readouterr().out.strip() == "暂无会话"
+    assert manager.calls == [(21, 0)]
 
 
 def test_parse_command_simple_name():

@@ -138,17 +138,33 @@ def _dispatch_session_command(parsed: ParsedCommand, session_manager) -> None:
         meta = session_manager.new_session(title)
         print(f"已创建新会话: {meta.id} | {meta.title}")
     elif name == "sessions":
-        sessions = session_manager.list_sessions()
+        if len(parsed.args) > 2:
+            print("用法: /sessions [每页数量] [页码]（默认每页 20 条）")
+            return
+        try:
+            limit = int(parsed.args[0]) if parsed.args else 20
+            page = int(parsed.args[1]) if len(parsed.args) == 2 else 1
+        except ValueError:
+            print("用法: /sessions [每页数量] [页码]（默认每页 20 条）")
+            return
+        if limit <= 0 or page <= 0:
+            print("用法: /sessions [每页数量] [页码]（默认每页 20 条）")
+            return
+        sessions = session_manager.list_sessions(limit=limit + 1, offset=(page - 1) * limit)
         cur = session_manager.get_current_session()
         cur_id = cur.id if cur is not None else None
         if not sessions:
             print("暂无会话")
         else:
-            for s in sessions:
+            for s in sessions[:limit]:
                 mark = "*" if s.id == cur_id else " "
                 print(
                     f"{mark} {s.id} | {s.title} | 更新: {s.updated_at} | 消息: {s.message_count}"
                 )
+            if len(sessions) > limit:
+                print(f"还有更多会话，可使用 /sessions {limit} {page + 1} 查看下一页")
+        if page > 1:
+            print(f"上一页: /sessions {limit} {page - 1}")
     elif name == "switch":
         if not parsed.args:
             print("用法: /switch <会话id>")
@@ -199,7 +215,7 @@ def _dispatch_session_command(parsed: ParsedCommand, session_manager) -> None:
     elif name == "help":
         print("会话命令:")
         print("  /new [标题]      创建新会话")
-        print("  /sessions        列出全部会话")
+        print("  /sessions [每页数量] [页码]  分页列出会话（默认每页 20 条）")
         print("  /switch <id>     切换会话")
         print("  /rename <标题>   重命名当前会话")
         print("  /delete <id>     删除会话(不能删除当前会话)")

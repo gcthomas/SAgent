@@ -225,19 +225,26 @@ class SessionStore:
                 ),
             )
 
-    def list_sessions(self) -> list[SessionMeta]:
-        """按 updated_at 降序返回全部会话。
+    def list_sessions(self, limit: int | None = None, offset: int = 0) -> list[SessionMeta]:
+        """按更新时间与 id 降序返回会话，可指定数量与偏移。
+
+        参数:
+            limit: 最多返回条数，为 None 时返回全部会话
+            offset: 指定 limit 时跳过的会话条数
 
         返回:
             会话元数据列表，最近更新的排在最前
         """
-        cur = self._conn.execute(
-            """
+        query = """
             SELECT id, title, created_at, updated_at, mode, message_count, persisted_seq
             FROM sessions
-            ORDER BY updated_at DESC
-            """
-        )
+            ORDER BY updated_at DESC, id DESC
+        """
+        if limit is not None:
+            query += " LIMIT ? OFFSET ?"
+            cur = self._conn.execute(query, (limit, offset))
+        else:
+            cur = self._conn.execute(query)
         rows = cur.fetchall()
         cur.close()
         return [

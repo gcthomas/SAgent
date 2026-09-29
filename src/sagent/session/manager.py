@@ -148,13 +148,17 @@ class SessionManager:
         self._store.delete_session(session_id)
         return True
 
-    def list_sessions(self) -> list[SessionMeta]:
-        """列出全部会话（按 updated_at 降序）。
+    def list_sessions(self, limit: int | None = None, offset: int = 0) -> list[SessionMeta]:
+        """按更新时间与 id 降序列出会话，可指定数量与偏移。
+
+        参数:
+            limit: 最多返回条数，为 None 时返回全部会话
+            offset: 指定 limit 时跳过的会话条数
 
         返回:
             会话元数据列表
         """
-        return self._store.list_sessions()
+        return self._store.list_sessions(limit=limit, offset=offset)
 
     def get_current_session(self) -> SessionMeta | None:
         """获取当前会话元数据。
