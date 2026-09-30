@@ -258,9 +258,20 @@ def _run_interactive(config: AppConfig, mode: str, reader: TerminalInput) -> int
     """使用入口持有的共享输入构建依赖并运行交互循环。"""
     # 构建依赖（权限执行器仅当 permissions.enabled 时注入，未启用时保持全自动执行）
     llm = LLMClient(config.llm)
+    summary_llm = (
+        LLMClient(config.context.summary_llm)
+        if config.context.enable_summary and config.context.summary_llm is not None
+        else None
+    )
     permission = _build_permission(config.permissions, reader=reader)
     registry = build_default_registry(permission=permission)
-    context_manager = ContextManager(config.context, llm, config.llm.model)
+    context_manager = ContextManager(
+        config.context,
+        summary_llm=summary_llm,
+        summary_model=config.context.summary_llm.model
+        if config.context.summary_llm is not None
+        else "",
+    )
 
     # 构建长期记忆管理器（仅当 memory 启用时）；并向工具表追加三个记忆工具
     memory_manager = None

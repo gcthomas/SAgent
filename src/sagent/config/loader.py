@@ -3,6 +3,8 @@
 从 YAML 文件加载配置，使用 pydantic 校验，并支持通过环境变量覆盖敏感/部署相关项：
 - LLM_API_KEY 覆盖 llm.api_key
 - LLM_API_URL 覆盖 llm.base_url
+- CONTEXT_SUMMARY_LLM_API_KEY 覆盖 context.summary_llm.api_key
+- CONTEXT_SUMMARY_LLM_API_URL 覆盖 context.summary_llm.base_url
 """
 
 from __future__ import annotations
@@ -21,6 +23,8 @@ DEFAULT_CONFIG_PATH = "config.yaml"
 # 环境变量名
 ENV_API_KEY = "LLM_API_KEY"
 ENV_API_URL = "LLM_API_URL"
+ENV_SUMMARY_API_KEY = "CONTEXT_SUMMARY_LLM_API_KEY"
+ENV_SUMMARY_API_URL = "CONTEXT_SUMMARY_LLM_API_URL"
 
 
 class ConfigError(Exception):
@@ -68,6 +72,19 @@ def load_config(config_path: str | None = None) -> AppConfig:
     if env_api_url:
         llm_section["base_url"] = env_api_url
 
+    context_section = raw.get("context")
+    if not isinstance(context_section, dict):
+        context_section = {}
+        raw["context"] = context_section
+    summary_section = context_section.get("summary_llm")
+    if isinstance(summary_section, dict):
+        env_summary_api_key = os.environ.get(ENV_SUMMARY_API_KEY)
+        if env_summary_api_key:
+            summary_section["api_key"] = env_summary_api_key
+        env_summary_api_url = os.environ.get(ENV_SUMMARY_API_URL)
+        if env_summary_api_url:
+            summary_section["base_url"] = env_summary_api_url
+
     try:
         config = AppConfig(**raw)
     except ValidationError as exc:
@@ -78,5 +95,15 @@ def load_config(config_path: str | None = None) -> AppConfig:
         raise ConfigError(
             f"缺少 LLM API Key。请在配置文件 llm.api_key 中填写，或设置环境变量 {ENV_API_KEY}。"
         )
+    if config.context.enable_summary:
+        if config.context.summary_llm is None:
+            raise ConfigError(
+                "启用 Context 摘要时必须配置 context.summary_llm。"
+            )
+        if not config.context.summary_llm.api_key:
+            raise ConfigError(
+                "缺少 Context 摘要 LLM API Key。请在配置文件 "
+                f"context.summary_llm.api_key 中填写，或设置环境变量 {ENV_SUMMARY_API_KEY}。"
+            )
 
     return config

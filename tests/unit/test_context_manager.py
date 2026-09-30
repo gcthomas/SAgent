@@ -380,7 +380,7 @@ def test_reset_clears_existing_summary(make_fake_llm):
         token_counter_method="heuristic",
     )
     llm = make_fake_llm([text_response("这是摘要内容")])
-    cm = ContextManager(config, llm=llm, model="")
+    cm = ContextManager(config, summary_llm=llm, summary_model="")
     cm.add_message({"role": "system", "content": "你是助手"})
     for i in range(10):
         cm.add_message(
@@ -412,7 +412,7 @@ def test_compaction_callback_invoked_with_summary_and_seq_range(make_fake_llm):
         token_counter_method="heuristic",
     )
     llm = make_fake_llm([text_response("这是摘要内容")])
-    cm = ContextManager(config, llm=llm, model="")
+    cm = ContextManager(config, summary_llm=llm, summary_model="")
 
     captured = []
     cm.set_compaction_callback(lambda summary, frm, to: captured.append((summary, frm, to)))
@@ -455,7 +455,7 @@ def test_compression_produces_no_orphan_tool_messages(make_fake_llm):
         token_counter_method="heuristic",
     )
     llm = make_fake_llm([text_response("这是摘要内容")])
-    cm = ContextManager(config, llm=llm, model="")
+    cm = ContextManager(config, summary_llm=llm, summary_model="")
     cm.add_message({"role": "system", "content": "你是助手"})
     cm.add_message({"role": "user", "content": "甲" * 80})
     cm.add_message(

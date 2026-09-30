@@ -58,6 +58,13 @@ context:
   use_api_calibration: true
   # 是否启用第三层 LLM 摘要压缩
   enable_summary: true
+  # 第三层 LLM 摘要压缩使用的独立模型，建议选择更小、更快、更便宜的模型
+  summary_llm:
+    model: "gpt-4o-mini"
+    api_key: ""
+    base_url: ""
+    temperature: 0.2
+    timeout: 60
   # 第三层 LLM 摘要压缩生成的摘要最大 token 数（注入摘要提示词约束 LLM 输出长度）
   summary_max_tokens: 500
 

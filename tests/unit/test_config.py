@@ -5,7 +5,14 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from sagent.config.loader import ENV_API_KEY, ENV_API_URL, ConfigError, load_config
+from sagent.config.loader import (
+    ENV_API_KEY,
+    ENV_API_URL,
+    ENV_SUMMARY_API_KEY,
+    ENV_SUMMARY_API_URL,
+    ConfigError,
+    load_config,
+)
 from sagent.config.models import PermissionConfig
 
 
@@ -23,6 +30,10 @@ llm:
   model: gpt-4o-mini
   api_key: sk-test
   temperature: 0.3
+context:
+  summary_llm:
+    model: gpt-4o-mini
+    api_key: sk-summary
 agent:
   mode: plan
   max_iterations: 3
@@ -32,6 +43,8 @@ agent:
     assert config.llm.model == "gpt-4o-mini"
     assert config.llm.api_key == "sk-test"
     assert config.llm.temperature == 0.3
+    assert config.context.summary_llm is not None
+    assert config.context.summary_llm.api_key == "sk-summary"
     assert config.agent.mode == "plan"
     assert config.agent.max_iterations == 3
 
@@ -63,6 +76,10 @@ def test_env_overrides_api_key_and_url(tmp_path, monkeypatch):
 llm:
   model: deepseek-chat
   api_key: sk-in-file
+context:
+  summary_llm:
+    model: summary-model
+    api_key: summary-in-file
 """,
     )
     config = load_config(str(path))
@@ -75,6 +92,66 @@ def test_invalid_top_level_raises(tmp_path):
     path = _write_config(tmp_path, "- just\n- a\n- list\n")
     with pytest.raises(ConfigError):
         load_config(str(path))
+
+
+def test_summary_llm_env_overrides_yaml(tmp_path, monkeypatch):
+    monkeypatch.setenv(ENV_API_KEY, "sk-main")
+    monkeypatch.setenv(ENV_SUMMARY_API_KEY, "sk-summary-env")
+    monkeypatch.setenv(ENV_SUMMARY_API_URL, "https://summary.example.com/v1")
+    path = _write_config(
+        tmp_path,
+        """
+llm:
+  model: main-model
+context:
+  summary_llm:
+    model: summary-model
+    api_key: summary-in-file
+    base_url: https://in-file.example.com/v1
+""",
+    )
+    config = load_config(str(path))
+    assert config.context.summary_llm is not None
+    assert config.context.summary_llm.api_key == "sk-summary-env"
+    assert config.context.summary_llm.base_url == "https://summary.example.com/v1"
+
+
+def test_summary_config_required_when_enabled(tmp_path, monkeypatch):
+    monkeypatch.setenv(ENV_API_KEY, "sk-main")
+    path = _write_config(tmp_path, "llm:\n  model: main-model\n")
+    with pytest.raises(ConfigError, match="context.summary_llm"):
+        load_config(str(path))
+
+
+def test_summary_api_key_required_when_enabled(tmp_path, monkeypatch):
+    monkeypatch.setenv(ENV_API_KEY, "sk-main")
+    path = _write_config(
+        tmp_path,
+        """
+llm:
+  model: main-model
+context:
+  summary_llm:
+    model: summary-model
+""",
+    )
+    with pytest.raises(ConfigError, match="Context 摘要 LLM API Key"):
+        load_config(str(path))
+
+
+def test_summary_config_optional_when_disabled(tmp_path, monkeypatch):
+    monkeypatch.setenv(ENV_API_KEY, "sk-main")
+    path = _write_config(
+        tmp_path,
+        """
+llm:
+  model: main-model
+context:
+  enable_summary: false
+""",
+    )
+    config = load_config(str(path))
+    assert config.context.summary_llm is None
 
 
 # ---------- PermissionConfig（权限控制配置） ----------

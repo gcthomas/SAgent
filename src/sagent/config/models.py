@@ -85,6 +85,8 @@ class ContextConfig(BaseModel):
     )
     # 是否启用第三层 LLM 摘要压缩
     enable_summary: bool = Field(default=True, description="是否启用 LLM 摘要压缩")
+    # 摘要压缩专用 LLM 配置，启用摘要时由配置加载器校验必填
+    summary_llm: LLMConfig | None = Field(default=None, description="Context 摘要专用 LLM 配置")
     # 摘要的最大 token 数（注入摘要提示词，约束 LLM 生成的摘要长度）
     summary_max_tokens: int = Field(default=500, description="生成的摘要最大 token 数，注入提示词约束 LLM 输出长度")
 

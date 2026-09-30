@@ -34,19 +34,19 @@ class ContextManager:
     def __init__(
         self,
         config: ContextConfig,
-        llm: Any | None = None,
-        model: str = "",
+        summary_llm: Any | None = None,
+        summary_model: str = "",
     ) -> None:
         """初始化上下文管理器。
 
         参数:
             config: 上下文管理配置
-            llm: LLM 客户端，用于第三层摘要压缩；enable_summary 为 False 时可为 None
-            model: 模型名称，用于 token 计数
+            summary_llm: 摘要专用 LLM 客户端；enable_summary 为 False 时可为 None
+            summary_model: 摘要模型名称，用于摘要 token 计数
         """
         self._config = config
-        self._llm = llm
-        self._model = model
+        self._summary_llm = summary_llm
+        self._summary_model = summary_model
         self._messages: list[dict[str, Any]] = []
         self._existing_summary: str | None = None  # 已有的历史摘要
         self._seq_counter: int = 0  # 会话内单调递增序号
@@ -58,13 +58,13 @@ class ContextManager:
 
         # 初始化策略实例
         self._truncation = ToolOutputTruncation(
-            config.max_tool_output_tokens, model, config.token_counter_method
+            config.max_tool_output_tokens, summary_model, config.token_counter_method
         )
         self._offload = ToolMessageOffload(config.keep_recent_messages)
         self._pruning = SlidingWindowPruning(config.keep_recent_messages)
-        if config.enable_summary and llm is not None:
+        if config.enable_summary and summary_llm is not None:
             self._summarizer = LLMSummaryCompression(
-                llm, config.summary_max_tokens, model, config.keep_recent_messages
+                summary_llm, config.summary_max_tokens, summary_model, config.keep_recent_messages
             )
         else:
             self._summarizer = None
@@ -136,7 +136,7 @@ class ContextManager:
         if self._calibrated_tokens is not None:
             new_msgs = self._messages[self._calibrated_count:]
             if new_msgs:
-                delta = count_tokens(new_msgs, self._model, self._config.token_counter_method)
+                delta = count_tokens(new_msgs, self._summary_model, self._config.token_counter_method)
                 total = self._calibrated_tokens + delta
                 logger.debug(
                     "混合校准 token 计数（基准 + delta）",
@@ -160,7 +160,7 @@ class ContextManager:
                 },
             )
             return self._calibrated_tokens
-        return count_tokens(self._messages, self._model, self._config.token_counter_method)
+        return count_tokens(self._messages, self._summary_model, self._config.token_counter_method)
 
     def ensure_system_prompt(self, prompt: str) -> None:
         """确保系统提示词是消息列表的第一条。如果不存在则插入到开头。
