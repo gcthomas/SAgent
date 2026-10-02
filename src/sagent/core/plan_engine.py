@@ -6,11 +6,12 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Callable
+from typing import Any
 
 from ..config.models import AgentConfig
 from ..context.context_manager import ContextManager
 from ..llm.client import LLMClient
+from .events import AgentEvent, EventHandler
 from ..observability import Span, get_logger
 from ..tools.registry import ToolRegistry
 from .prompts import PLAN_DECOMPOSE_PROMPT, PLAN_SUMMARY_PROMPT, REACT_SYSTEM_PROMPT
@@ -27,7 +28,7 @@ class PlanEngine:
         llm: LLMClient,
         registry: ToolRegistry,
         agent_config: AgentConfig,
-        on_event: Callable[[str], None] | None = None,
+        on_event: EventHandler | None = None,
         context_manager: ContextManager | None = None,
     ) -> None:
         self.llm = llm
@@ -36,12 +37,37 @@ class PlanEngine:
         self._on_event = on_event
         self._context_manager = context_manager
         self._outcome = "completed"
+        self._step_context: tuple[int, int, str] | None = None
         # 每个步骤复用 ReAct 引擎执行，传入 context_manager 实现上下文持久化
-        self._react = ReActEngine(llm, registry, agent_config, on_event, context_manager=context_manager)
+        self._react = ReActEngine(
+            llm,
+            registry,
+            agent_config,
+            self._forward_react_event,
+            context_manager=context_manager,
+        )
 
-    def _emit(self, text: str) -> None:
+    def _emit(self, event: AgentEvent) -> None:
         if self._on_event:
-            self._on_event(text)
+            self._on_event(event)
+
+    def _forward_react_event(self, event: AgentEvent) -> None:
+        """为 Plan 步骤内的 ReAct 事件补充步骤上下文。"""
+        if self._step_context is None:
+            event = AgentEvent(
+                event_type=event.event_type,
+                content=event.content,
+                mode="plan",
+                scope="plan_fallback",
+                iteration=event.iteration,
+                tool_name=event.tool_name,
+                tool_arguments=event.tool_arguments,
+                tool_call_id=event.tool_call_id,
+            )
+        else:
+            index, total, step = self._step_context
+            event = event.with_plan_context(index=index, total=total, step=step)
+        self._emit(event)
 
     def run(self, task: str, memory_prefix: str | None = None) -> str:
         """执行 Plan 模式任务：拆解 -> 分步执行 -> 汇总。
@@ -64,26 +90,56 @@ class PlanEngine:
 
         if not steps:
             # 拆解失败时回退为直接用 ReAct 执行整个任务
-            self._emit("[提示] 未能拆解出步骤，直接执行整个任务。")
+            self._emit(
+                AgentEvent(
+                    event_type="notice",
+                    content="未能拆解出步骤，直接执行整个任务。",
+                    mode="plan",
+                    scope="plan_fallback",
+                )
+            )
             logger.warning("Plan 拆解失败，回退 ReAct", extra={"event": "plan_fallback"})
             self._outcome = "plan_fallback"
             return self._react.run(task, memory_prefix=memory_prefix)
 
         decompose_span.set_attribute("sagent.step_count", len(steps))
-        self._emit(f"[计划] 共拆解为 {len(steps)} 个步骤：")
+        self._emit(
+            AgentEvent(
+                event_type="plan_started",
+                content=f"[计划] 共拆解为 {len(steps)} 个步骤：",
+                mode="plan",
+            )
+        )
         logger.info(
             "Plan 拆解完成",
             extra={"event": "plan_decomposed", "step_count": len(steps), "steps": steps},
         )
         for idx, step in enumerate(steps, start=1):
-            self._emit(f"  {idx}. {step}")
+            self._emit(
+                AgentEvent(
+                    event_type="notice",
+                    content=f"{idx}. {step}",
+                    mode="plan",
+                    plan_step_index=idx,
+                    plan_step_total=len(steps),
+                    plan_step=step,
+                )
+            )
 
         step_results: list[str] = []
         for idx, step in enumerate(steps, start=1):
             with Span("plan.step") as step_span:
                 step_span.set_attribute("sagent.step_index", idx)
                 step_span.set_attribute("sagent.step_total", len(steps))
-                self._emit(f"\n[执行步骤 {idx}/{len(steps)}] {step}")
+                self._emit(
+                    AgentEvent(
+                        event_type="plan_step_started",
+                        mode="plan",
+                        plan_step_index=idx,
+                        plan_step_total=len(steps),
+                        plan_step=step,
+                    )
+                )
                 logger.info(
                     "Plan 执行步骤",
                     extra={"event": "plan_step", "index": idx, "total": len(steps), "step": step},
@@ -94,7 +150,11 @@ class PlanEngine:
                     f"当前需要完成的步骤: {step}\n"
                     f"请完成该步骤并给出结果。"
                 )
-                result = self._react.run(step_task, memory_prefix=memory_prefix)
+                self._step_context = (idx, len(steps), step)
+                try:
+                    result = self._react.run(step_task, memory_prefix=memory_prefix)
+                finally:
+                    self._step_context = None
                 step_results.append(f"步骤 {idx}（{step}）结果:\n{result}")
 
         logger.info("Plan 汇总结果", extra={"event": "plan_summarize"})

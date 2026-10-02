@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from conftest import text_response, tool_response
 
+from sagent.core.events import AgentEvent
 from sagent.core.plan_engine import PlanEngine
 from sagent.tools import build_default_registry
 
@@ -29,7 +30,12 @@ def test_plan_decompose_execute_summarize(make_fake_llm, agent_config):
 
     assert result == "整体汇总结果"
     assert llm.remaining == 0
-    assert any("[计划]" in e for e in events)
+    assert all(isinstance(event, AgentEvent) for event in events)
+    assert any(event.event_type == "plan_started" for event in events)
+    step_events = [event for event in events if event.event_type == "plan_step_started"]
+    assert [(event.plan_step_index, event.plan_step_total) for event in step_events] == [(1, 2), (2, 2)]
+    completed_events = [event for event in events if event.event_type == "react_completed"]
+    assert [(event.plan_step_index, event.plan_step) for event in completed_events] == [(1, "步骤一"), (2, "步骤二")]
 
 
 def test_plan_fallback_when_decompose_fails(make_fake_llm, agent_config):
@@ -48,7 +54,11 @@ def test_plan_fallback_when_decompose_fails(make_fake_llm, agent_config):
     result = engine.run("任务")
 
     assert result == "直接执行的结果"
-    assert any("直接执行整个任务" in e for e in events)
+    fallback_events = [event for event in events if event.event_type == "notice"]
+    assert any(
+        event.scope == "plan_fallback" and "直接执行整个任务" in (event.content or "")
+        for event in fallback_events
+    )
 
 
 def test_plan_step_uses_tool(make_fake_llm, agent_config, tmp_path):

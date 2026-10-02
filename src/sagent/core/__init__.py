@@ -1,6 +1,7 @@
 """核心模块公开接口。"""
 
+from .events import AgentEvent, EventHandler
 from .plan_engine import PlanEngine
 from .react_engine import ReActEngine
 
-__all__ = ["ReActEngine", "PlanEngine"]
+__all__ = ["AgentEvent", "EventHandler", "ReActEngine", "PlanEngine"]

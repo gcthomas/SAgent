@@ -32,6 +32,7 @@ from ..terminal_input import TerminalInput
 from ..tools import AddMemoryTool, RemoveMemoryTool, ReplaceMemoryTool, build_default_registry
 from ..tools.mcp import MCPSessionManager, build_mcp_providers
 from .commands import ParsedCommand, parse_command
+from .event_presenter import EventPresenter
 
 # 退出命令
 _EXIT_COMMANDS = {"exit", "quit", ":q"}
@@ -57,11 +58,6 @@ def _build_parser() -> argparse.ArgumentParser:
         help="执行模式：react 或 plan（默认取配置文件中的 agent.mode）",
     )
     return parser
-
-
-def _print_event(text: str) -> None:
-    """打印中间过程事件。"""
-    print(text, flush=True)
 
 
 def resolve_mode(args_mode: str | None, config_mode: str) -> str:
@@ -304,8 +300,9 @@ def _run_interactive(config: AppConfig, mode: str, reader: TerminalInput) -> int
         # 不在启动时自动创建会话，延迟到首次用户输入时按需创建，
         # 避免用户直接退出或仅浏览历史时产生垃圾空会话
 
+    presenter = EventPresenter()
     engine = build_engine(
-        mode, llm, registry, config.agent, on_event=_print_event,
+        mode, llm, registry, config.agent, on_event=presenter.handle,
         context_manager=context_manager,
     )
 

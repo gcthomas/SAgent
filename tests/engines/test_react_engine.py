@@ -7,6 +7,7 @@ import logging
 from conftest import make_tool_call, text_response, tool_response
 
 from sagent.config.models import AgentConfig
+from sagent.core.events import AgentEvent
 from sagent.core.react_engine import ReActEngine
 from sagent.tools import build_default_registry
 
@@ -47,8 +48,16 @@ def test_react_tool_then_answer(make_fake_llm, agent_config, tmp_path, caplog):
     assert any(m.get("role") == "tool" for m in second_call_messages)
     assert any(m.get("content") == "文件内容" for m in second_call_messages)
     # 过程事件包含行动与观察
-    assert any("[行动]" in e for e in events)
-    assert any("[观察]" in e for e in events)
+    tool_call_events = [e for e in events if e.event_type == "tool_call"]
+    tool_result_events = [e for e in events if e.event_type == "tool_result"]
+    assert len(tool_call_events) == 1
+    assert tool_call_events[0].tool_name == "read_file"
+    assert tool_call_events[0].tool_arguments == {"path": str(target)}
+    assert tool_call_events[0].iteration == 1
+    assert tool_call_events[0].tool_call_id is not None
+    assert len(tool_result_events) == 1
+    assert tool_result_events[0].content == "文件内容"
+    assert any(isinstance(e, AgentEvent) and e.event_type == "react_completed" for e in events)
     # 验证工具执行日志被正确记录，extra 字段无保留属性冲突
     tool_call_records = [
         r for r in caplog.records if getattr(r, "event", None) == "tool_call"

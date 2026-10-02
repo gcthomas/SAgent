@@ -27,6 +27,7 @@ from conftest import FakeLLMClient, make_tool_call, text_response, tool_response
 
 from sagent.config.models import AgentConfig, ContextConfig
 from sagent.context.context_manager import ContextManager
+from sagent.core.events import AgentEvent
 from sagent.core.plan_engine import PlanEngine
 from sagent.core.react_engine import ReActEngine
 from sagent.llm.client import LLMResponse
@@ -79,7 +80,7 @@ def _react_engine(
 
 def _run_react(scenario: Scenario, llm: FakeLLMClient, tmp_path: Path) -> tuple[str, dict[str, object]]:
     """默认执行器：按场景的 mode/max_iterations 用对应引擎执行一遍任务。"""
-    events: list[str] = []
+    events: list[AgentEvent] = []
     if scenario.mode == "plan":
         result = PlanEngine(
             llm,
@@ -93,9 +94,20 @@ def _run_react(scenario: Scenario, llm: FakeLLMClient, tmp_path: Path) -> tuple[
     return result, {"events": events, "tmp_path": tmp_path}
 
 
-def expect_event(events: list[str], substring: str) -> None:
+def event_text(event: AgentEvent) -> str:
+    """将结构化事件转换为评测所需的展示文本。"""
+    if event.event_type == "tool_call":
+        return f"[行动] 调用工具 {event.tool_name}，参数: {event.tool_arguments}"
+    if event.event_type == "tool_result":
+        return f"[观察] {event.content or ''}"
+    if event.event_type == "notice":
+        return f"[提示] {event.content or ''}"
+    return event.content or ""
+
+
+def expect_event(events: list[AgentEvent], substring: str) -> None:
     """断言过程事件流中存在包含 substring 的事件。"""
-    assert any(substring in event for event in events), (
+    assert any(substring in event_text(event) for event in events), (
         f"事件流中未找到包含 {substring!r} 的事件，实际事件: {events}"
     )
 
@@ -205,7 +217,11 @@ def unknown_tool_then_continue() -> Scenario:
         ]
 
     def validate(scenario, result, llm, runtime):
-        assert any("错误" in event for event in runtime["events"] if "观察" in event)
+        assert any(
+            "错误" in event_text(event)
+            for event in runtime["events"]
+            if event.event_type == "tool_result"
+        )
 
     return Scenario(
         name="unknown_tool_then_continue",
@@ -228,7 +244,11 @@ def invalid_arguments_then_retry() -> Scenario:
         ]
 
     def validate(scenario, result, llm, runtime):
-        assert any("错误" in event for event in runtime["events"] if "观察" in event)
+        assert any(
+            "错误" in event_text(event)
+            for event in runtime["events"]
+            if event.event_type == "tool_result"
+        )
         expect_event(runtime["events"], "调用工具 write_file")
 
     return Scenario(
@@ -362,7 +382,7 @@ def memory_security_block() -> Scenario:
         ]
 
     def run(scenario, llm, tmp_path):
-        events: list[str] = []
+        events: list[AgentEvent] = []
         store = MemoryStore(tmp_path)
         manager = MemoryManager(store, llm)
         registry = build_default_registry()
@@ -377,7 +397,11 @@ def memory_security_block() -> Scenario:
         return result, {"events": events, "store": store}
 
     def validate(scenario, result, llm, runtime):
-        assert any("错误" in event for event in runtime["events"] if "观察" in event)
+        assert any(
+            "错误" in event_text(event)
+            for event in runtime["events"]
+            if event.event_type == "tool_result"
+        )
         assert runtime["store"].read_all("memory") == "安全的项目经验"
 
     return Scenario(

@@ -6,11 +6,13 @@
 
 from __future__ import annotations
 
-from typing import Any, Callable
+import json
+from typing import Any
 
 from ..config.models import AgentConfig
 from ..context.context_manager import ContextManager
 from ..llm.client import LLMClient
+from .events import AgentEvent, EventHandler
 from ..observability import Span, get_logger
 from ..tools.registry import ToolRegistry
 from .prompts import REACT_SYSTEM_PROMPT
@@ -26,7 +28,7 @@ class ReActEngine:
         llm: LLMClient,
         registry: ToolRegistry,
         agent_config: AgentConfig,
-        on_event: Callable[[str], None] | None = None,
+        on_event: EventHandler | None = None,
         context_manager: ContextManager | None = None,
     ) -> None:
         """初始化引擎。
@@ -45,10 +47,10 @@ class ReActEngine:
         self._context_manager = context_manager
         self._outcome = "completed"
 
-    def _emit(self, text: str) -> None:
-        """输出过程事件。"""
+    def _emit(self, event: AgentEvent) -> None:
+        """输出结构化过程事件。"""
         if self._on_event:
-            self._on_event(text)
+            self._on_event(event)
 
     def run(self, task: str, memory_prefix: str | None = None) -> str:
         """执行一个任务并返回最终答案。
@@ -94,7 +96,12 @@ class ReActEngine:
                 # 没有工具调用，视为最终答案
                 if not response.has_tool_calls:
                     if response.content:
-                        self._emit(f"[最终答案] {response.content}")
+                        self._emit(
+                            AgentEvent(
+                                event_type="react_completed",
+                                content=response.content,
+                            )
+                        )
                     logger.info(
                         "ReAct 得到最终答案",
                         extra={"event": "react_final", "iteration": iteration},
@@ -106,9 +113,25 @@ class ReActEngine:
 
                 # 依次执行工具调用并追加观察结果
                 for call in response.tool_calls:
-                    self._emit(f"[行动] 调用工具 {call['name']}，参数: {call['arguments']}")
+                    self._emit(
+                        AgentEvent(
+                            event_type="tool_call",
+                            iteration=iteration,
+                            tool_name=call["name"],
+                            tool_arguments=self._parse_tool_arguments(call["arguments"]),
+                            tool_call_id=call["id"],
+                        )
+                    )
                     observation = self.registry.execute(call["name"], call["arguments"])
-                    self._emit(f"[观察] {observation}")
+                    self._emit(
+                        AgentEvent(
+                            event_type="tool_result",
+                            content=observation,
+                            iteration=iteration,
+                            tool_name=call["name"],
+                            tool_call_id=call["id"],
+                        )
+                    )
                     messages.append(
                         {
                             "role": "tool",
@@ -122,7 +145,12 @@ class ReActEngine:
             self._outcome = "max_iterations"
             with Span("agent.finalize") as finalize_span:
                 finalize_span.set_attribute("sagent.max_iterations", self.config.max_iterations)
-                self._emit(f"[提示] 已达到最大迭代次数 {self.config.max_iterations}，尝试给出当前结论。")
+                self._emit(
+                    AgentEvent(
+                        event_type="notice",
+                        content=f"已达到最大迭代次数 {self.config.max_iterations}，尝试给出当前结论。",
+                    )
+                )
                 logger.warning(
                     "ReAct 达到最大迭代次数",
                     extra={"event": "react_max_iterations", "max_iterations": self.config.max_iterations},
@@ -166,7 +194,12 @@ class ReActEngine:
                 if not response.has_tool_calls:
                     cm.add_message({"role": "assistant", "content": response.content})
                     if response.content:
-                        self._emit(f"[最终答案] {response.content}")
+                        self._emit(
+                            AgentEvent(
+                                event_type="react_completed",
+                                content=response.content,
+                            )
+                        )
                     logger.info(
                         "ReAct 得到最终答案",
                         extra={"event": "react_final", "iteration": iteration},
@@ -178,9 +211,23 @@ class ReActEngine:
 
                 # 依次执行工具调用并追加观察结果到上下文
                 for call in response.tool_calls:
-                    self._emit(f"[行动] 调用工具 {call['name']}，参数: {call['arguments']}")
+                    self._emit(
+                        AgentEvent(
+                            event_type="tool_call",
+                            tool_name=call["name"],
+                            tool_arguments=self._parse_tool_arguments(call["arguments"]),
+                            tool_call_id=call["id"],
+                        )
+                    )
                     observation = self.registry.execute(call["name"], call["arguments"])
-                    self._emit(f"[观察] {observation}")
+                    self._emit(
+                        AgentEvent(
+                            event_type="tool_result",
+                            content=observation,
+                            tool_name=call["name"],
+                            tool_call_id=call["id"],
+                        )
+                    )
                     cm.add_message(
                         {
                             "role": "tool",
@@ -194,7 +241,12 @@ class ReActEngine:
             self._outcome = "max_iterations"
             with Span("agent.finalize") as finalize_span:
                 finalize_span.set_attribute("sagent.max_iterations", self.config.max_iterations)
-                self._emit(f"[提示] 已达到最大迭代次数 {self.config.max_iterations}，尝试给出当前结论。")
+                self._emit(
+                    AgentEvent(
+                        event_type="notice",
+                        content=f"已达到最大迭代次数 {self.config.max_iterations}，尝试给出当前结论。",
+                    )
+                )
                 logger.warning(
                     "ReAct 达到最大迭代次数",
                     extra={"event": "react_max_iterations", "max_iterations": self.config.max_iterations},
@@ -207,6 +259,16 @@ class ReActEngine:
                 final.content
                 or f"未能在 {self.config.max_iterations} 轮内完成任务，请尝试拆分任务或增大 max_iterations。"
             )
+
+    @staticmethod
+    def _parse_tool_arguments(arguments: Any) -> Any:
+        """将工具参数解析为结构化值。"""
+        if not isinstance(arguments, str):
+            return arguments
+        try:
+            return json.loads(arguments) if arguments.strip() else {}
+        except json.JSONDecodeError:
+            return arguments
 
     @staticmethod
     def _assistant_message(response: Any) -> dict[str, Any]:
