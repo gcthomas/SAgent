@@ -12,6 +12,8 @@ EventType = Literal[
     "tool_result",
     "notice",
     "react_completed",
+    "llm_text_delta",
+    "llm_completed",
 ]
 
 

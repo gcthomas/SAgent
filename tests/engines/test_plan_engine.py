@@ -38,6 +38,25 @@ def test_plan_decompose_execute_summarize(make_fake_llm, agent_config):
     assert [(event.plan_step_index, event.plan_step) for event in completed_events] == [(1, "步骤一"), (2, "步骤二")]
 
 
+def test_plan_streaming_decompose_steps_and_summary(make_fake_llm, agent_config):
+    """Plan 拆解不渲染内部 JSON，步骤和汇总复用流式路径。"""
+    llm = make_fake_llm(
+        [
+            text_response('{"steps": ["步骤一"]}'),
+            text_response("步骤完成"),
+            text_response("最终汇总"),
+        ],
+        stream=True,
+    )
+    events: list[AgentEvent] = []
+    engine = PlanEngine(llm, build_default_registry(), agent_config, on_event=events.append)
+
+    assert engine.run("复杂任务") == "最终汇总"
+    assert len(llm.calls) == 3
+    assert [event.content for event in events if event.event_type == "llm_text_delta"] == list("步骤完成最终汇总")
+    assert not any(event.content and '{"steps"' in event.content for event in events)
+
+
 def test_plan_fallback_when_decompose_fails(make_fake_llm, agent_config):
     """拆解结果无法解析时，回退为直接 ReAct 执行整个任务。"""
     responses = [

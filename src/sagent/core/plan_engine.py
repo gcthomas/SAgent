@@ -10,7 +10,7 @@ from typing import Any
 
 from ..config.models import AgentConfig
 from ..context.context_manager import ContextManager
-from ..llm.client import LLMClient
+from ..llm.client import LLMClient, LLMStreamEvent
 from .events import AgentEvent, EventHandler
 from ..observability import Span, get_logger
 from ..tools.registry import ToolRegistry
@@ -50,6 +50,24 @@ class PlanEngine:
     def _emit(self, event: AgentEvent) -> None:
         if self._on_event:
             self._on_event(event)
+
+    def _on_llm_event(self, event: LLMStreamEvent) -> None:
+        """将 Plan 顶层流式事件转为结构化 Agent 事件。"""
+        if event.event_type == "text_delta":
+            self._emit(AgentEvent(event_type="llm_text_delta", content=event.content, mode="plan"))
+        elif event.event_type == "completed":
+            self._emit(
+                AgentEvent(
+                    event_type="llm_completed",
+                    content=event.response.content if event.response else None,
+                    mode="plan",
+                )
+            )
+
+    def _chat(self, messages: list[dict[str, Any]], emit_stream: bool = True):
+        """发起 Plan 请求，流式配置下由客户端发送增量事件。"""
+        callback = self._on_llm_event if emit_stream else None
+        return self.llm.chat(messages, tools=None, on_event=callback)
 
     def _forward_react_event(self, event: AgentEvent) -> None:
         """为 Plan 步骤内的 ReAct 事件补充步骤上下文。"""
@@ -173,7 +191,7 @@ class PlanEngine:
             {"role": "system", "content": PLAN_DECOMPOSE_PROMPT},
             {"role": "user", "content": task},
         ]
-        response = self.llm.chat(messages, tools=None)
+        response = self._chat(messages, emit_stream=False)
         content = (response.content or "").strip()
         return self._parse_steps(content)
 
@@ -210,5 +228,5 @@ class PlanEngine:
                 "content": f"用户原始任务:\n{task}\n\n各步骤执行结果:\n{joined}",
             },
         ]
-        response = self.llm.chat(messages, tools=None)
+        response = self._chat(messages)
         return response.content or joined

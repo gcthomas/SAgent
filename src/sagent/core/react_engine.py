@@ -11,7 +11,7 @@ from typing import Any
 
 from ..config.models import AgentConfig
 from ..context.context_manager import ContextManager
-from ..llm.client import LLMClient
+from ..llm.client import LLMClient, LLMStreamEvent
 from .events import AgentEvent, EventHandler
 from ..observability import Span, get_logger
 from ..tools.registry import ToolRegistry
@@ -52,6 +52,28 @@ class ReActEngine:
         if self._on_event:
             self._on_event(event)
 
+    def _on_llm_event(self, event: LLMStreamEvent) -> None:
+        """将 LLM 流式事件转换为 Agent 事件。"""
+        if event.event_type == "text_delta":
+            self._emit(AgentEvent(event_type="llm_text_delta", content=event.content))
+        elif event.event_type == "completed":
+            self._emit(
+                AgentEvent(
+                    event_type="llm_completed",
+                    content=event.response.content if event.response else None,
+                )
+            )
+
+    def _chat(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        emit_stream: bool = True,
+    ) -> Any:
+        """发起 LLM 请求，流式配置下由客户端发送增量事件。"""
+        callback = self._on_llm_event if emit_stream else None
+        return self.llm.chat(messages, tools=tools, on_event=callback)
+
     def run(self, task: str, memory_prefix: str | None = None) -> str:
         """执行一个任务并返回最终答案。
 
@@ -91,7 +113,7 @@ class ReActEngine:
                     "ReAct 迭代",
                     extra={"event": "react_iteration", "iteration": iteration},
                 )
-                response = self.llm.chat(messages, tools=tools)
+                response = self._chat(messages, tools=tools)
 
                 # 没有工具调用，视为最终答案
                 if not response.has_tool_calls:
@@ -155,7 +177,7 @@ class ReActEngine:
                     "ReAct 达到最大迭代次数",
                     extra={"event": "react_max_iterations", "max_iterations": self.config.max_iterations},
                 )
-                final = self.llm.chat(messages, tools=None)
+                final = self._chat(messages, tools=None)
             return (
                 final.content
                 or f"未能在 {self.config.max_iterations} 轮内完成任务，请尝试拆分任务或增大 max_iterations。"
@@ -187,7 +209,7 @@ class ReActEngine:
                     extra={"event": "react_iteration", "iteration": iteration},
                 )
                 messages = cm.get_messages()
-                response = self.llm.chat(messages, tools=tools)
+                response = self._chat(messages, tools=tools)
                 cm.record_llm_usage(response.usage)
 
                 # 没有工具调用，视为最终答案
@@ -252,7 +274,7 @@ class ReActEngine:
                     extra={"event": "react_max_iterations", "max_iterations": self.config.max_iterations},
                 )
                 messages = cm.get_messages()
-                final = self.llm.chat(messages, tools=None)
+                final = self._chat(messages, tools=None)
                 cm.record_llm_usage(final.usage)
                 cm.add_message({"role": "assistant", "content": final.content})
             return (

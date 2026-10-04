@@ -52,7 +52,12 @@ class _SpannedLLM:
         """暴露内部客户端的剩余响应数。"""
         return self._inner.remaining
 
-    def chat(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None) -> Any:
+    def chat(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        on_event: Any = None,
+    ) -> Any:
         """发起对话请求，在 gen_ai.chat Span 中执行。"""
         with Span("gen_ai.chat") as span:
             span.set_attribute("gen_ai.operation.name", "chat")
@@ -61,7 +66,7 @@ class _SpannedLLM:
             span.set_attribute("gen_ai.request.message_count", len(messages))
             if tools:
                 span.set_attribute("gen_ai.request.tool_count", len(tools))
-            response = self._inner.chat(messages, tools)
+            response = self._inner.chat(messages, tools=tools, on_event=on_event)
             if response.usage:
                 span.set_attribute("gen_ai.usage.input_tokens", response.usage["prompt_tokens"])
                 span.set_attribute("gen_ai.usage.output_tokens", response.usage["completion_tokens"])

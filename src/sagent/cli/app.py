@@ -10,6 +10,8 @@ import argparse
 import sys
 from pathlib import Path
 
+from prompt_toolkit.output import create_output
+
 from ..config.loader import ConfigError, load_config
 from ..config.models import AppConfig, PermissionConfig
 from ..context.context_manager import ContextManager
@@ -300,7 +302,7 @@ def _run_interactive(config: AppConfig, mode: str, reader: TerminalInput) -> int
         # 不在启动时自动创建会话，延迟到首次用户输入时按需创建，
         # 避免用户直接退出或仅浏览历史时产生垃圾空会话
 
-    presenter = EventPresenter()
+    presenter = EventPresenter(create_output())
     engine = build_engine(
         mode, llm, registry, config.agent, on_event=presenter.handle,
         context_manager=context_manager,
@@ -316,7 +318,7 @@ def _run_interactive(config: AppConfig, mode: str, reader: TerminalInput) -> int
     tool_names = ", ".join(t.name for t in registry.list_tools())
     print("=" * 60)
     print("SAgent 已启动")
-    print(f"模型: {config.llm.model}  |  模式: {mode}")
+    print(f"模型: {config.llm.model}  |  模式: {mode}  |  流式输出: {'开启' if config.llm.stream else '关闭'}")
     print(f"可用工具: {tool_names}")
     if session_manager is not None:
         cur = session_manager.get_current_session()
@@ -401,11 +403,28 @@ def _run_interactive(config: AppConfig, mode: str, reader: TerminalInput) -> int
                 extra={"event": "user_input", "mode": mode},
             )
 
+            # 每轮开始前重置 presenter 的流式跟踪，并终结上一轮可能残留的半行输出
+            presenter.begin_turn()
             try:
                 answer = engine.run(user_input, memory_prefix=memory_prefix)
+            except KeyboardInterrupt:
+                # 用户在执行期间中断：终结流式半行，记录状态后继续交互循环
+                span.set_attribute("sagent.outcome", "interrupted")
+                span.set_status("error")
+                presenter.end_streaming()
+                print("[已中断当前执行]")
+                logger.info("用户中断执行", extra={"event": "run_interrupted"})
+                if session_manager is not None and config.session.auto_save:
+                    try:
+                        session_manager.save_current()
+                    except Exception:
+                        logger.exception("会话自动保存失败", extra={"event": "session_save_error"})
+                continue
             except Exception as exc:  # 捕获运行期异常，避免整个 CLI 崩溃
                 span.set_attribute("sagent.outcome", "failed")
                 span.set_status("error")
+                # 异常可能发生在流式输出中途：先终结半行，避免下一轮输出粘连
+                presenter.end_streaming()
                 print(f"执行出错: {exc}", file=sys.stderr)
                 logger.exception("执行出错", extra={"event": "run_error"})
                 # 异常时也尝试保存已有消息
@@ -425,7 +444,10 @@ def _run_interactive(config: AppConfig, mode: str, reader: TerminalInput) -> int
                 "生成最终回复",
                 extra={"event": "final_answer", "answer_length": len(answer)},
             )
-            print(f"\n助手 > {answer}")
+            # 非流式模式始终打印；流式模式下仅当本轮没有任何增量流出时
+            # 才打印兜底答案（如空内容提示、最大迭代收尾），避免重复输出
+            if not config.llm.stream or not presenter.turn_streamed:
+                print(f"\n助手 > {answer}")
 
         # 每轮问答后增量保存会话消息
         if session_manager is not None and config.session.auto_save:

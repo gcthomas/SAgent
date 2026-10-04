@@ -8,7 +8,10 @@ ReAct / Plan 引擎的多轮交互，实现可复现的离线测试。
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 from typing import Any
+
+from sagent.llm.client import LLMStreamEvent
 
 import pytest
 
@@ -57,13 +60,15 @@ def tool_response(tool_calls: list[dict[str, Any]], content: str = "", usage: di
 class FakeLLMClient:
     """假的 LLM 客户端，按队列返回预设响应。
 
-    与真实 LLMClient 一样暴露 chat(messages, tools=None) -> LLMResponse。
+    与真实 LLMClient 一样暴露 chat(messages, tools=None, on_event=None) -> LLMResponse，
+    并模拟其流式语义：stream=True 且提供 on_event 时按字符增量发送文本并发送完成事件。
     每次调用 chat 会弹出队列头部的一个响应；同时记录所有入参，便于断言。
     """
 
-    def __init__(self, responses: list[LLMResponse]):
+    def __init__(self, responses: list[LLMResponse], stream: bool = False):
         # 使用副本，避免测试间相互影响
         self._responses = list(responses)
+        self.config = SimpleNamespace(stream=stream)
         # 记录每次 chat 的调用参数：{"messages": ..., "tools": ...}
         self.calls: list[dict[str, Any]] = []
 
@@ -71,6 +76,7 @@ class FakeLLMClient:
         self,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
+        on_event=None,
     ) -> LLMResponse:
         self.calls.append({"messages": messages, "tools": tools})
         if not self._responses:
@@ -78,7 +84,13 @@ class FakeLLMClient:
                 "FakeLLMClient 响应队列已空，但引擎再次调用了 chat()。"
                 "请检查预设响应数量是否与预期轮次匹配。"
             )
-        return self._responses.pop(0)
+        response = self._responses.pop(0)
+        # 流式配置且有回调时按字符回放增量，模拟真实客户端的流式行为
+        if on_event is not None and self.config.stream:
+            for char in response.content:
+                on_event(LLMStreamEvent("text_delta", content=char))
+            on_event(LLMStreamEvent("completed", response=response))
+        return response
 
     @property
     def remaining(self) -> int:
@@ -96,7 +108,7 @@ def agent_config() -> AgentConfig:
 def make_fake_llm():
     """工厂 fixture：传入响应列表，返回 FakeLLMClient。"""
 
-    def _factory(responses: list[LLMResponse]) -> FakeLLMClient:
-        return FakeLLMClient(responses)
+    def _factory(responses: list[LLMResponse], stream: bool = False) -> FakeLLMClient:
+        return FakeLLMClient(responses, stream=stream)
 
     return _factory

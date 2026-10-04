@@ -43,10 +43,27 @@ agent:
     assert config.llm.model == "gpt-4o-mini"
     assert config.llm.api_key == "sk-test"
     assert config.llm.temperature == 0.3
+    assert config.llm.stream is True
     assert config.context.summary_llm is not None
     assert config.context.summary_llm.api_key == "sk-summary"
     assert config.agent.mode == "plan"
     assert config.agent.max_iterations == 3
+
+
+def test_llm_stream_can_be_disabled(tmp_path):
+    path = _write_config(
+        tmp_path,
+        """
+llm:
+  model: gpt-4o-mini
+  api_key: sk-test
+  stream: false
+context:
+  enable_summary: false
+""",
+    )
+    config = load_config(str(path))
+    assert config.llm.stream is False
 
 
 def test_missing_file_raises(tmp_path):

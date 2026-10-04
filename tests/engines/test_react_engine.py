@@ -21,6 +21,35 @@ def test_react_direct_answer(make_fake_llm, agent_config):
     assert len(llm.calls) == 1
 
 
+def test_react_streaming_text_deltas(make_fake_llm, agent_config):
+    """流式回答按顺序转发文本增量，并保持完整返回值。"""
+    llm = make_fake_llm([text_response("流式答案")], stream=True)
+    events: list[AgentEvent] = []
+    engine = ReActEngine(llm, build_default_registry(), agent_config, on_event=events.append)
+
+    assert engine.run("问题") == "流式答案"
+    assert [event.content for event in events if event.event_type == "llm_text_delta"] == list("流式答案")
+    assert [event.event_type for event in events if event.event_type == "llm_completed"] == ["llm_completed"]
+
+
+def test_react_streaming_tool_executes_once(make_fake_llm, agent_config, tmp_path):
+    """流式工具调用完成后只执行一次工具，并继续下一轮。"""
+    target = tmp_path / "data.txt"
+    target.write_text("内容", encoding="utf-8")
+    llm = make_fake_llm(
+        [
+            tool_response([make_tool_call("read_file", {"path": str(target)})]),
+            text_response("已完成"),
+        ],
+        stream=True,
+    )
+    engine = ReActEngine(llm, build_default_registry(), agent_config)
+
+    assert engine.run("读取") == "已完成"
+    assert len(llm.calls) == 2
+    assert any(message.get("role") == "tool" for message in llm.calls[1]["messages"])
+
+
 def test_react_tool_then_answer(make_fake_llm, agent_config, tmp_path, caplog):
     """第一轮请求工具，第二轮基于观察给出答案。"""
     target = tmp_path / "data.txt"

@@ -24,8 +24,10 @@ class LLMConfig(BaseModel):
     base_url: str = Field(default="", description="OpenAI 兼容 API 的基础地址")
     # 采样温度
     temperature: float = Field(default=0.7, description="采样温度")
-    # 单次请求超时时间（秒）
+    # 请求超时时间（秒）
     timeout: float = Field(default=60.0, description="请求超时时间（秒）")
+    # 是否使用 Chat Completions 流式输出
+    stream: bool = Field(default=True, description="是否启用流式输出")
 
 
 class AgentConfig(BaseModel):
