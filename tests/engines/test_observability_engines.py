@@ -239,7 +239,7 @@ def test_react_tool_call_trace(make_fake_llm, agent_config, tmp_path, obs_env):
 
 def test_react_max_iterations_trace(make_fake_llm, obs_env):
     """ReAct 达到最大迭代次数时 agent.react 有 outcome=max_iterations，且存在 agent.finalize。"""
-    config = AgentConfig(mode="react", max_iterations=2)
+    config = AgentConfig(max_iterations=2)
     llm = _SpannedLLM(
         make_fake_llm(
             [

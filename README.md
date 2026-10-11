@@ -1,13 +1,14 @@
 # SAgent
 
-一个简单、通用、可扩展的 CLI Agent 应用。基于 OpenAI SDK 调用大模型，支持 ReAct 与 Plan 两种执行模式，内置文件读写与 Shell 执行工具，并为未来 MCP / skill 扩展预留接口。
+一个简单、通用、可扩展的 CLI Agent 应用。基于 OpenAI SDK 调用大模型，提供 ReAct 执行循环与自适应计划（Plan）能力，内置文件读写与 Shell 执行工具，并为未来 MCP / skill 扩展预留接口。
 
 ## 特性
 
 - CLI 交互：命令行接收输入并给出回答
-- 两种模式：
-  - ReAct：推理 - 行动 - 观察 循环
-  - Plan：先拆解任务为步骤，再逐步执行并汇总
+- 统一执行编排：ReAct 与 Plan 融合为单一 Agent 入口，计划策略由配置项 `planning.strategy` 控制
+  - adaptive：由 LLM 自适应判断是否需要计划，简单任务直通 ReAct，复杂任务先拆解再执行
+  - always：始终先拆解任务为步骤，再逐步执行并汇总
+  - never：始终使用纯 ReAct（推理 - 行动 - 观察 循环）
 - 工具系统：基于 pydantic 定义参数 schema，对接 LLM function calling
   - 内置工具：`read_file`、`write_file`、`run_shell`
   - 预留 `ToolProvider` 接口，供未来接入 MCP / skill
@@ -45,8 +46,11 @@ llm:
   temperature: 0.7
   timeout: 60
 agent:
-  mode: "react"     # 默认模式：react 或 plan
   max_iterations: 10
+planning:
+  strategy: "adaptive"   # 计划策略：adaptive / always / never
+  max_steps: 10          # 单次计划允许的最大步骤数
+  max_replans: 2         # 单次任务允许的最大重规划次数
 logging:
   enabled: true
   level: "DEBUG"          # 文件日志级别
@@ -90,11 +94,8 @@ $env:LLM_API_URL = "https://api.deepseek.com/v1"
 # 使用配置文件默认模式
 python main.py
 
-# 指定 ReAct 模式
-python main.py --mode react
-
-# 指定 Plan 模式与自定义配置文件
-python main.py --config config.yaml --mode plan
+# 指定配置文件
+python main.py --config config.yaml
 ```
 
 进入交互后输入问题即可对话，输入 `exit` 或 `quit` 退出。启用会话管理后还可用斜杠命令管理会话：

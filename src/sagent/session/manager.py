@@ -14,6 +14,7 @@ from datetime import datetime
 from typing import Any
 
 from ..context.context_manager import ContextManager
+from ..core.plan_state import PlanState
 from ..observability import get_logger
 from .models import CompactionEvent, SessionMeta, SessionMessage
 from .store import SessionStore
@@ -44,6 +45,7 @@ class SessionManager:
         self._current_session_id: str | None = None
         # 当前会话已持久化的最大 seq
         self._persisted_seq: int = 0
+        self._active_plan: PlanState | None = None
         # 注册压缩摘要事件回调
         self._cm.set_compaction_callback(self._on_compaction)
 
@@ -76,6 +78,7 @@ class SessionManager:
         self._current_session_id = meta.id
         self._persisted_seq = 0
         self._cm.reset()
+        self._active_plan: PlanState | None = None
         logger.info(
             "创建新会话",
             extra={"event": "session_new", "session_id": meta.id, "mode": self._mode},
@@ -105,6 +108,9 @@ class SessionManager:
         self._cm.load_messages(dict_msgs)
         self._current_session_id = session_id
         self._persisted_seq = session.persisted_seq
+        self._active_plan = None
+        if session.plan_state and session.plan_state.get("status") == "executing":
+            self._active_plan = PlanState.from_dict(session.plan_state)
         logger.info(
             "切换会话",
             extra={
@@ -185,6 +191,8 @@ class SessionManager:
             return 0
         new_dicts = self._cm.export_new_messages(self._persisted_seq)
         if not new_dicts:
+            if self._active_plan is not None:
+                self._store.save_plan_state(self._current_session_id, self._active_plan.to_dict())
             return 0
         session_messages = [self._dict_to_session_message(d) for d in new_dicts]
         count = self._store.append_messages(
@@ -193,6 +201,8 @@ class SessionManager:
         # 推进持久化游标为新增消息中的最大 seq（若有新增）
         if count > 0:
             self._persisted_seq = max(m.seq for m in session_messages)
+        if self._active_plan is not None:
+            self._store.save_plan_state(self._current_session_id, self._active_plan.to_dict())
         logger.info(
             "增量保存会话消息",
             extra={
@@ -203,6 +213,22 @@ class SessionManager:
             },
         )
         return count
+
+    def set_active_plan(self, plan_state: PlanState | None) -> None:
+        """设置当前活动计划并持久化其结构化快照。"""
+        if plan_state is None and self._active_plan is None:
+            return
+        # 清空已有计划必须写库；非空计划即使是同一可变对象也需保存新快照。
+        self._active_plan = plan_state
+        if self._current_session_id is not None:
+            self._store.save_plan_state(
+                self._current_session_id,
+                plan_state.to_dict() if plan_state is not None else None,
+            )
+
+    def get_active_plan(self) -> PlanState | None:
+        """返回当前会话的活动计划。"""
+        return self._active_plan
 
     def _on_compaction(
         self, summary: str, covered_from_seq: int, covered_to_seq: int

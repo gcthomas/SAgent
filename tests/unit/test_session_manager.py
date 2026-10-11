@@ -9,11 +9,13 @@ from __future__ import annotations
 
 import os
 import tempfile
+from unittest.mock import patch
 
 import pytest
 
 from sagent.config.models import ContextConfig
 from sagent.context.context_manager import ContextManager
+from sagent.core.plan_state import PlanState, PlanStepState
 from sagent.session.manager import SessionManager
 from sagent.session.models import CompactionEvent, SessionMessage, SessionMeta
 from sagent.session.store import SessionStore
@@ -84,6 +86,109 @@ def test_switch_session_loads_working_context(manager):
     assert len(msgs) == 2
     assert msgs[0]["content"] == "session1-msg1"
     assert msgs[1]["content"] == "session1-msg2"
+
+
+def test_active_plan_is_persisted_and_restored_on_session_switch(manager):
+    mgr, store, cm = manager
+    meta = mgr.new_session()
+    plan = PlanState(
+        version=1,
+        task="恢复任务",
+        steps=[PlanStepState(description="继续执行", status="running")],
+        current_step=1,
+        status="executing",
+        recent_observation="上一步观察",
+        artifact_refs=["https://example.test/result"],
+    )
+    mgr.set_active_plan(plan)
+    mgr.save_current()
+    mgr.new_session()
+
+    restored_manager = SessionManager(store, ContextManager(ContextConfig(token_counter_method="heuristic")))
+    restored_manager.switch_session(meta.id)
+    restored = restored_manager.get_active_plan()
+
+    assert restored is not None
+    assert restored.task == "恢复任务"
+    assert restored.recent_observation == "上一步观察"
+    assert restored.artifact_refs == ["https://example.test/result"]
+
+
+def test_clear_absent_active_plan_skips_database_operations(manager):
+    """无活动计划时重复清空不调用存储，也不执行 SQL。"""
+    mgr, store, cm = manager
+    mgr.new_session()
+    statements = []
+    store._conn.set_trace_callback(statements.append)
+    try:
+        with patch.object(store, "save_plan_state", wraps=store.save_plan_state) as save_plan:
+            mgr.set_active_plan(None)
+            mgr.set_active_plan(None)
+            save_plan.assert_not_called()
+        assert statements == []
+        assert mgr.get_active_plan() is None
+    finally:
+        store._conn.set_trace_callback(None)
+
+
+def test_clear_active_plan_removes_persisted_snapshot(manager):
+    """清空已有计划写入空快照，重新加载会话不会恢复旧计划。"""
+    mgr, store, cm = manager
+    meta = mgr.new_session()
+    plan = PlanState(
+        version=1, task="待完成任务", steps=[PlanStepState(description="继续执行")],
+        status="executing",
+    )
+    mgr.set_active_plan(plan)
+    assert store.get_session(meta.id).plan_state == plan.to_dict()
+
+    with patch.object(store, "save_plan_state", wraps=store.save_plan_state) as save_plan:
+        mgr.set_active_plan(None)
+        mgr.set_active_plan(None)
+        save_plan.assert_called_once_with(meta.id, None)
+
+    assert mgr.get_active_plan() is None
+    assert store.get_session(meta.id).plan_state is None
+    restored_manager = SessionManager(store, ContextManager(ContextConfig(token_counter_method="heuristic")))
+    restored_manager.switch_session(meta.id)
+    assert restored_manager.get_active_plan() is None
+
+
+def test_same_active_plan_object_persists_updated_snapshot(manager):
+    """同一可变计划对象的状态更新仍保存独立快照。"""
+    mgr, store, cm = manager
+    meta = mgr.new_session()
+    plan = PlanState(
+        version=1, task="执行任务", steps=[PlanStepState(description="执行步骤")],
+        status="executing",
+    )
+    with patch.object(store, "save_plan_state", wraps=store.save_plan_state) as save_plan:
+        mgr.set_active_plan(plan)
+        initial_snapshot = save_plan.call_args.args[1]
+        plan.steps[0].status = "completed"
+        plan.steps[0].summary = "步骤已完成"
+        plan.status = "completed"
+        mgr.set_active_plan(plan)
+
+        assert save_plan.call_count == 2
+        save_plan.assert_called_with(meta.id, plan.to_dict())
+        assert initial_snapshot["steps"][0]["status"] == "pending"
+        assert initial_snapshot["status"] == "executing"
+
+    assert mgr.get_active_plan() is plan
+    assert store.get_session(meta.id).plan_state == plan.to_dict()
+
+
+def test_non_executing_plan_is_not_restored_as_active(manager):
+    mgr, store, cm = manager
+    meta = mgr.new_session()
+    plan = PlanState(version=1, task="已结束", steps=[], status="blocked")
+    mgr.set_active_plan(plan)
+
+    restored_manager = SessionManager(store, ContextManager(ContextConfig(token_counter_method="heuristic")))
+    restored_manager.switch_session(meta.id)
+
+    assert restored_manager.get_active_plan() is None
 
 
 def test_switch_nonexistent_returns_none(manager):

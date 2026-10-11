@@ -7,6 +7,9 @@ from typing import Any, Callable, Literal
 
 EventType = Literal[
     "plan_started",
+    "plan_decision",
+    "plan_replanned",
+    "plan_completed",
     "plan_step_started",
     "tool_call",
     "tool_result",
@@ -32,6 +35,7 @@ class AgentEvent:
     plan_step_index: int | None = None
     plan_step_total: int | None = None
     plan_step: str | None = None
+    plan_status: str | None = None
 
     def with_plan_context(self, *, index: int, total: int, step: str) -> AgentEvent:
         """补充当前 Plan 步骤上下文。"""

@@ -1,7 +1,7 @@
 """CLI 应用。
 
 提供命令行入口：加载配置、构建工具与引擎，进入交互循环。
-支持通过 --config 指定配置文件，--mode 选择 react / plan 执行模式。
+支持通过 --config 指定配置文件，计划策略由配置文件中的 planning.strategy 控制。
 """
 
 from __future__ import annotations
@@ -13,10 +13,9 @@ from pathlib import Path
 from prompt_toolkit.output import create_output
 
 from ..config.loader import ConfigError, load_config
-from ..config.models import AppConfig, PermissionConfig
+from ..config.models import AppConfig, PermissionConfig, PlanningConfig
 from ..context.context_manager import ContextManager
-from ..core.plan_engine import PlanEngine
-from ..core.react_engine import ReActEngine
+from ..core.agent_engine import AgentEngine
 from ..llm.client import LLMClient
 from ..memory import MemoryManager, MemoryStore
 from ..observability import Span, close_observability, flush_metrics, get_logger, setup_content_capture, setup_logging, setup_observability
@@ -42,43 +41,46 @@ _EXIT_COMMANDS = {"exit", "quit", ":q"}
 logger = get_logger(__name__)
 
 
+class _ArgumentParser(argparse.ArgumentParser):
+    """为已移除的模式参数提供明确的迁移提示。"""
+
+    def error(self, message: str) -> None:
+        if "--mode" in message:
+            message = f"{message}；--mode 已移除，请改用配置文件中的 planning.strategy"
+        super().error(message)
+
+
 def _build_parser() -> argparse.ArgumentParser:
     """构建命令行参数解析器。"""
-    parser = argparse.ArgumentParser(
+    parser = _ArgumentParser(
         prog="sagent",
-        description="SAgent: 一个简单通用的 CLI Agent（支持 ReAct 与 Plan 模式）。",
+        description="SAgent: 一个简单通用的 CLI Agent。",
     )
     parser.add_argument(
         "--config",
         default=None,
         help="配置文件路径（默认 config.yaml）",
     )
-    parser.add_argument(
-        "--mode",
-        choices=["react", "plan"],
-        default=None,
-        help="执行模式：react 或 plan（默认取配置文件中的 agent.mode）",
-    )
     return parser
 
 
-def resolve_mode(args_mode: str | None, config_mode: str) -> str:
-    """确定最终执行模式：命令行 --mode 优先，否则回退到配置中的默认模式。"""
-    return args_mode or config_mode
-
-
 def build_engine(
-    mode: str,
     llm: LLMClient,
     registry,
     agent_config,
+    planning_config: PlanningConfig | None = None,
     on_event=None,
     context_manager=None,
-) -> PlanEngine | ReActEngine:
-    """根据模式构建对应的执行引擎。"""
-    if mode == "plan":
-        return PlanEngine(llm, registry, agent_config, on_event=on_event, context_manager=context_manager)
-    return ReActEngine(llm, registry, agent_config, on_event=on_event, context_manager=context_manager)
+) -> AgentEngine:
+    """构建统一入口执行引擎。"""
+    return AgentEngine(
+        llm,
+        registry,
+        agent_config,
+        planning_config=planning_config,
+        on_event=on_event,
+        context_manager=context_manager,
+    )
 
 
 def _build_permission(
@@ -245,14 +247,11 @@ def run() -> int:
         extra={"event": "startup", "model": config.llm.model},
     )
 
-    # 命令行 --mode 覆盖配置中的默认模式
-    mode = resolve_mode(args.mode, config.agent.mode)
-
     with TerminalInput() as reader:
-        return _run_interactive(config, mode, reader)
+        return _run_interactive(config, reader)
 
 
-def _run_interactive(config: AppConfig, mode: str, reader: TerminalInput) -> int:
+def _run_interactive(config: AppConfig, reader: TerminalInput) -> int:
     """使用入口持有的共享输入构建依赖并运行交互循环。"""
     # 构建依赖（权限执行器仅当 permissions.enabled 时注入，未启用时保持全自动执行）
     llm = LLMClient(config.llm)
@@ -298,15 +297,20 @@ def _run_interactive(config: AppConfig, mode: str, reader: TerminalInput) -> int
     session_manager = None
     if config.session.enabled:
         session_store = SessionStore(config.session.db_path, config.session.enable_fts)
-        session_manager = SessionManager(session_store, context_manager, mode=mode)
+        session_manager = SessionManager(session_store, context_manager)
         # 不在启动时自动创建会话，延迟到首次用户输入时按需创建，
         # 避免用户直接退出或仅浏览历史时产生垃圾空会话
 
     presenter = EventPresenter(create_output())
     engine = build_engine(
-        mode, llm, registry, config.agent, on_event=presenter.handle,
+        llm,
+        registry,
+        config.agent,
+        planning_config=config.planning,
+        on_event=presenter.handle,
         context_manager=context_manager,
     )
+    engine._session_manager = session_manager
 
     # 会话开始前构建冻结的记忆前缀：memory 启用时读取记忆文件构造前缀，
     # 整个会话复用同一份前缀以命中 prefix cache；未启用时为 None，保持默认行为。
@@ -318,7 +322,10 @@ def _run_interactive(config: AppConfig, mode: str, reader: TerminalInput) -> int
     tool_names = ", ".join(t.name for t in registry.list_tools())
     print("=" * 60)
     print("SAgent 已启动")
-    print(f"模型: {config.llm.model}  |  模式: {mode}  |  流式输出: {'开启' if config.llm.stream else '关闭'}")
+    print(
+        f"模型: {config.llm.model}  |  计划策略: {config.planning.strategy}  |  "
+        f"流式输出: {'开启' if config.llm.stream else '关闭'}"
+    )
     print(f"可用工具: {tool_names}")
     if session_manager is not None:
         cur = session_manager.get_current_session()
@@ -397,10 +404,10 @@ def _run_interactive(config: AppConfig, mode: str, reader: TerminalInput) -> int
                 session_id = cur.id
 
         with Span("agent.run", session_id=session_id) as span:
-            span.set_attribute("sagent.mode", mode)
+            span.set_attribute("sagent.planning_strategy", config.planning.strategy)
             logger.info(
                 "收到用户输入",
-                extra={"event": "user_input", "mode": mode},
+                extra={"event": "user_input", "planning_strategy": config.planning.strategy},
             )
 
             # 每轮开始前重置 presenter 的流式跟踪，并终结上一轮可能残留的半行输出
@@ -410,6 +417,7 @@ def _run_interactive(config: AppConfig, mode: str, reader: TerminalInput) -> int
             except KeyboardInterrupt:
                 # 用户在执行期间中断：终结流式半行，记录状态后继续交互循环
                 span.set_attribute("sagent.outcome", "interrupted")
+                span.set_attribute("sagent.mode", engine.last_mode)
                 span.set_status("error")
                 presenter.end_streaming()
                 print("[已中断当前执行]")
@@ -422,6 +430,7 @@ def _run_interactive(config: AppConfig, mode: str, reader: TerminalInput) -> int
                 continue
             except Exception as exc:  # 捕获运行期异常，避免整个 CLI 崩溃
                 span.set_attribute("sagent.outcome", "failed")
+                span.set_attribute("sagent.mode", engine.last_mode)
                 span.set_status("error")
                 # 异常可能发生在流式输出中途：先终结半行，避免下一轮输出粘连
                 presenter.end_streaming()
@@ -439,6 +448,7 @@ def _run_interactive(config: AppConfig, mode: str, reader: TerminalInput) -> int
             if not answer:
                 outcome = "empty_answer"
             span.set_attribute("sagent.outcome", outcome)
+            span.set_attribute("sagent.mode", engine.last_mode)
             span.set_attribute("sagent.answer_length", len(answer))
             logger.info(
                 "生成最终回复",

@@ -44,11 +44,26 @@ class EventPresenter:
     def handle(self, event: AgentEvent) -> None:
         """渲染一个 Agent 事件。"""
         if event.event_type == "llm_text_delta":
-            self._write_delta(event.content or "")
+            if event.scope == "top_level" and event.mode in ("react", "plan"):
+                self._write_delta(event.content or "")
+            return
         elif event.event_type == "llm_completed":
-            self.end_streaming()
+            if event.scope == "top_level" and event.mode in ("react", "plan"):
+                self.end_streaming()
+            return
         elif event.event_type == "plan_started":
             self._write(event.content or "")
+        elif event.event_type == "plan_decision":
+            self._write(f"[计划] {event.content or ''}")
+        elif event.event_type == "plan_replanned":
+            self._write(f"[计划] {event.content or '已重新规划'}")
+        elif event.event_type == "plan_completed":
+            label = {
+                "completed": "计划完成",
+                "blocked": "计划受阻",
+                "failed": "计划失败",
+            }.get(event.plan_status or "", event.content or "计划状态未知")
+            self._write(f"[计划] {label}")
         elif event.event_type == "plan_step_started":
             self._write(
                 f"\n[执行步骤 {event.plan_step_index}/{event.plan_step_total}] "

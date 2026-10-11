@@ -98,7 +98,7 @@ def test_react_tool_then_answer(make_fake_llm, agent_config, tmp_path, caplog):
 
 def test_react_hits_max_iterations(make_fake_llm):
     """持续请求工具直到达到迭代上限，触发收尾请求。"""
-    config = AgentConfig(mode="react", max_iterations=2)
+    config = AgentConfig(max_iterations=2)
     # 2 轮工具调用 + 1 次收尾无工具请求 = 3 个响应
     responses = [
         tool_response([make_tool_call("read_file", {"path": "x"})]),

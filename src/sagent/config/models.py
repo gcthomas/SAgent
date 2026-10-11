@@ -33,10 +33,18 @@ class LLMConfig(BaseModel):
 class AgentConfig(BaseModel):
     """Agent 运行相关配置。"""
 
-    # 默认执行模式：react 或 plan
-    mode: Literal["react", "plan"] = Field(default="react", description="默认执行模式")
     # ReAct 循环的最大迭代次数
-    max_iterations: int = Field(default=10, description="ReAct 循环最大迭代次数")
+    max_iterations: int = Field(default=10, ge=1, description="ReAct 循环最大迭代次数")
+
+
+class PlanningConfig(BaseModel):
+    """计划策略与计划执行限制配置。"""
+
+    strategy: Literal["adaptive", "always", "never"] = Field(
+        default="adaptive", description="计划策略：自适应、始终计划或从不计划"
+    )
+    max_steps: int = Field(default=10, ge=1, description="单次计划允许的最大步骤数")
+    max_replans: int = Field(default=2, ge=0, description="单次任务允许的最大重规划次数")
 
 
 class LoggingConfig(BaseModel):
@@ -262,6 +270,7 @@ class AppConfig(BaseModel):
 
     llm: LLMConfig
     agent: AgentConfig = Field(default_factory=AgentConfig)
+    planning: PlanningConfig = Field(default_factory=PlanningConfig, description="计划策略与限制配置")
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     context: ContextConfig = Field(default_factory=ContextConfig, description="上下文管理配置")
     session: SessionConfig = Field(default_factory=SessionConfig, description="会话管理配置")

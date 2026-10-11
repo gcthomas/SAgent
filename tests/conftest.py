@@ -101,7 +101,7 @@ class FakeLLMClient:
 @pytest.fixture
 def agent_config() -> AgentConfig:
     """提供一个默认 Agent 配置（较小的迭代上限，便于测试上限逻辑）。"""
-    return AgentConfig(mode="react", max_iterations=5)
+    return AgentConfig(max_iterations=5)
 
 
 @pytest.fixture

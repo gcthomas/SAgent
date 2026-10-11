@@ -2,8 +2,8 @@
 
 将 src 目录加入 sys.path 后调用 CLI 主入口。
 运行示例:
-    python main.py --mode react
-    python main.py --config config.yaml --mode plan
+    python main.py
+    python main.py --config config.yaml
 """
 
 from __future__ import annotations

@@ -1,20 +1,33 @@
 """CLI 参数解析与引擎选择的针对性测试。
 
-只覆盖 app.py 中含逻辑的部分（参数解析、模式覆盖、引擎选择），
+只覆盖 app.py 中含逻辑的部分（参数解析、旧参数迁移提示、引擎选择），
 不测试打印横幅与交互式输入循环等纯 IO 代码。
 """
 
 from __future__ import annotations
 
 import sys
+from types import SimpleNamespace
 
 import pytest
 
-from sagent.cli.app import _build_parser, _build_permission, _dispatch_session_command, build_engine, resolve_mode
+import sagent.cli.app as cli_app
+from sagent.cli.app import _build_parser, _build_permission, _dispatch_session_command, build_engine
 from sagent.cli.commands import ParsedCommand, parse_command
+from sagent.config.models import (
+    AgentConfig,
+    AppConfig,
+    ContextConfig,
+    LLMConfig,
+    MCPConfig,
+    MemoryConfig,
+    ObservabilityConfig,
+    PermissionConfig,
+    PlanningConfig,
+    SessionConfig,
+)
+from sagent.core.events import AgentEvent
 from sagent.session.models import SessionMeta
-from sagent.config.models import AgentConfig, PermissionConfig
-from sagent.core.plan_engine import PlanEngine
 from sagent.core.react_engine import ReActEngine
 from sagent.permissions import Decision, PermissionEnforcer
 from sagent.tools import build_default_registry
@@ -23,42 +36,129 @@ from sagent.tools import build_default_registry
 def test_parser_defaults():
     args = _build_parser().parse_args([])
     assert args.config is None
-    assert args.mode is None
+    assert not hasattr(args, "mode")
 
 
-def test_parser_parses_mode_and_config():
-    args = _build_parser().parse_args(["--mode", "plan", "--config", "my.yaml"])
-    assert args.mode == "plan"
+def test_parser_parses_config_only():
+    args = _build_parser().parse_args(["--config", "my.yaml"])
     assert args.config == "my.yaml"
+    assert not hasattr(args, "mode")
 
 
-def test_parser_rejects_invalid_mode():
+def test_parser_rejects_removed_mode_with_migration_hint(capsys):
     with pytest.raises(SystemExit):
-        _build_parser().parse_args(["--mode", "invalid"])
+        _build_parser().parse_args(["--mode", "plan"])
+    assert "请改用配置文件中的 planning.strategy" in capsys.readouterr().err
 
 
-def test_resolve_mode_prefers_cli_arg():
-    # 命令行 --mode 优先于配置默认值
-    assert resolve_mode("plan", "react") == "plan"
+def test_parser_rejects_planning_as_unknown_argument(capsys):
+    with pytest.raises(SystemExit):
+        _build_parser().parse_args(["--planning", "always"])
+    error = capsys.readouterr().err
+    assert "unrecognized arguments: --planning always" in error
 
 
-def test_resolve_mode_falls_back_to_config():
-    # 未指定命令行 --mode 时回退到配置默认值
-    assert resolve_mode(None, "plan") == "plan"
+class _InteractiveReader:
+    """按顺序提供一轮问题与退出命令。"""
+
+    def __init__(self) -> None:
+        self.inputs = iter(["测试问题", "exit"])
+
+    def read(self, _prompt: str) -> str:
+        return next(self.inputs)
+
+
+class _RecordingOutput:
+    """记录 CLI 展示器写入的终端文本。"""
+
+    def __init__(self) -> None:
+        self.text = ""
+
+    def write(self, data: str) -> None:
+        self.text += data
+
+    def flush(self) -> None:
+        pass
+
+
+@pytest.fixture
+def interactive_config():
+    """构造不触碰外部资源的交互配置。"""
+    return lambda stream, strategy="never": AppConfig(
+        llm=LLMConfig(model="test-model", stream=stream),
+        agent=AgentConfig(max_iterations=1),
+        planning=PlanningConfig(strategy=strategy),
+        context=ContextConfig(enable_summary=False),
+        session=SessionConfig(enabled=False),
+        memory=MemoryConfig(enabled=False),
+        mcp=MCPConfig(enabled=False),
+        observability=ObservabilityConfig(enabled=False),
+    )
+
+
+@pytest.mark.parametrize(
+    "name,stream,strategy,mode,scope,delta,answer",
+    [
+        ("stream_top_level", True, "never", "react", "top_level", "最终答案", "最终答案"),
+        ("stream_without_delta", True, "never", "react", "top_level", None, "完整答案"),
+        ("non_stream", False, "never", "react", "top_level", None, "关闭流式答案"),
+        ("plan_step", True, "always", "plan", "plan_step", "步骤增量", "计划最终答案"),
+        ("plan_summary", True, "always", "plan", "top_level", "汇总答案", "汇总答案"),
+    ],
+)
+def test_run_interactive_final_output_deduplicates_streaming_and_plan_text(
+    monkeypatch, capsys, interactive_config, name, stream, strategy, mode, scope, delta, answer
+):
+    """通过 _run_interactive 验证流式正文、完整响应和 Plan 作用域的最终输出。"""
+    output = _RecordingOutput()
+
+    class _Engine:
+        def __init__(self, on_event):
+            self.on_event = on_event
+            # 模拟引擎的本轮实际执行路径，供 app 记录 sagent.mode 使用
+            self.last_mode = mode
+
+        def run(self, _task: str, memory_prefix=None) -> str:
+            if delta is not None:
+                self.on_event(
+                    AgentEvent(
+                        event_type="llm_text_delta",
+                        content=delta,
+                        mode=mode,
+                        scope=scope,
+                    )
+                )
+                self.on_event(
+                    AgentEvent(
+                        event_type="llm_completed",
+                        content=delta,
+                        mode=mode,
+                        scope=scope,
+                    )
+                )
+            return answer
+
+    monkeypatch.setattr(cli_app, "LLMClient", lambda config: SimpleNamespace(config=config))
+    monkeypatch.setattr(
+        cli_app, "build_engine", lambda *args, on_event, **kwargs: _Engine(on_event)
+    )
+    monkeypatch.setattr(cli_app, "create_output", lambda: output)
+    monkeypatch.setattr(cli_app, "flush_metrics", lambda: None)
+    monkeypatch.setattr(cli_app, "close_observability", lambda: None)
+
+    cli_app._run_interactive(interactive_config(stream, strategy), _InteractiveReader())
+
+    rendered = output.text + capsys.readouterr().out
+    assert rendered.count(f"助手 > {answer}\n") == 1, name
+    if scope == "plan_step":
+        assert delta not in rendered
 
 
 def test_build_engine_react():
     engine = build_engine(
-        "react", llm=None, registry=build_default_registry(), agent_config=AgentConfig()
+        llm=None, registry=build_default_registry(), agent_config=AgentConfig()
     )
     assert isinstance(engine, ReActEngine)
-
-
-def test_build_engine_plan():
-    engine = build_engine(
-        "plan", llm=None, registry=build_default_registry(), agent_config=AgentConfig()
-    )
-    assert isinstance(engine, PlanEngine)
 
 
 def _make_session(session_id: str) -> SessionMeta:

@@ -95,6 +95,20 @@ def test_create_and_get_session(store):
     assert got.persisted_seq == meta.persisted_seq
 
 
+def test_create_session_with_plan_state_roundtrip(store):
+    """创建含 plan_state 的会话并读回，plan_state 与原始 dict 相等。"""
+    plan_state = {"status": "running", "steps": [{"id": 1, "description": "第一步"}]}
+    meta = _make_meta().model_copy(update={"plan_state": plan_state})
+    store.create_session(meta)
+
+    got = store.get_session("s1")
+    assert got is not None
+    assert got.plan_state == plan_state
+
+    listed = store.list_sessions()
+    assert listed[0].plan_state == plan_state
+
+
 def test_list_sessions_ordered_by_updated_at_desc(store):
     """创建多个会话（不同 updated_at），list_sessions 按 updated_at DESC 排序。"""
     m1 = _make_meta(id="s1")

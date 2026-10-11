@@ -21,10 +21,16 @@ llm:
   stream: true
 
 agent:
-  # 默认执行模式：react 或 plan
-  mode: "react"
   # ReAct 循环最大迭代次数
   max_iterations: 10
+
+planning:
+  # 计划策略：adaptive（自适应）/ always（始终计划）/ never（从不计划）
+  strategy: "adaptive"
+  # 单次计划允许的最大步骤数
+  max_steps: 10
+  # 单次任务允许的最大重规划次数
+  max_replans: 2
 
 logging:
   # 是否启用日志系统

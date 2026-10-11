@@ -74,13 +74,24 @@ class ReActEngine:
         callback = self._on_llm_event if emit_stream else None
         return self.llm.chat(messages, tools=tools, on_event=callback)
 
-    def run(self, task: str, memory_prefix: str | None = None) -> str:
+    def run(
+        self,
+        task: str,
+        memory_prefix: str | None = None,
+        plan_projection: str | None = None,
+        persist_task: bool = True,
+    ) -> str:
         """执行一个任务并返回最终答案。
 
         参数:
             task: 用户任务/输入。
             memory_prefix: 可选的记忆注入前缀，叠加到 ReAct 系统提示词之前
                 （而非替换）。会话开始时由调用方冻结构建一次，整个会话复用。
+            plan_projection: 可选的计划状态投影，仅作为本次执行中迭代请求的
+                临时 system 消息，不写入上下文历史，也不持久化计划快照。
+            persist_task: 是否将 task 作为 user 消息加入上下文管理器，默认 True。
+                False 用于避免 Plan 子步骤提示写入历史，不影响助手消息和工具
+                结果的记录；无上下文管理器时仍将 task 用于请求，此参数不生效。
 
         返回:
             最终答案文本。
@@ -99,13 +110,15 @@ class ReActEngine:
 
             # 注入了上下文管理器时，走跨轮次上下文持久化路径
             if self._context_manager is not None:
-                return self._run_with_context(task, prompt, tools)
+                return self._run_with_context(task, prompt, tools, plan_projection, persist_task)
 
             # 无上下文管理器时，保持原有逻辑
             messages: list[dict[str, Any]] = [
                 {"role": "system", "content": prompt},
                 {"role": "user", "content": task},
             ]
+            if plan_projection:
+                messages.append({"role": "system", "content": plan_projection})
 
             for iteration in range(1, self.config.max_iterations + 1):
                 span.add_event("iteration", {"index": iteration})
@@ -183,13 +196,28 @@ class ReActEngine:
                 or f"未能在 {self.config.max_iterations} 轮内完成任务，请尝试拆分任务或增大 max_iterations。"
             )
 
-    def _run_with_context(self, task: str, prompt: str, tools: list[dict[str, Any]]) -> str:
+    def _run_with_context(
+        self,
+        task: str,
+        prompt: str,
+        tools: list[dict[str, Any]],
+        plan_projection: str | None = None,
+        persist_task: bool = True,
+    ) -> str:
         """使用上下文管理器执行任务，实现跨轮次上下文持久化。
 
         参数:
             task: 用户任务/输入。
             prompt: 系统提示词。
             tools: 工具 schema 列表。
+            plan_projection: 可选的计划状态投影，仅追加到迭代请求的消息副本，
+                不调用 add_message 写回历史；达到迭代上限的收尾请求不附加投影。
+            persist_task: 是否将 task 作为 user 消息加入上下文历史。False 仅跳过
+                该输入的记录，助手消息、工具调用及结果仍照常加入上下文。
+
+        持久化边界:
+            本方法只维护 ContextManager 的消息历史；会话落盘由调用方另行保存，
+            结构化计划快照由会话管理器保存，不通过计划投影写入消息历史。
 
         返回:
             最终答案文本。
@@ -197,7 +225,8 @@ class ReActEngine:
         cm = self._context_manager
         # 确保系统提示词在上下文中，并添加用户消息
         cm.ensure_system_prompt(prompt)
-        cm.add_message({"role": "user", "content": task})
+        if persist_task:
+            cm.add_message({"role": "user", "content": task})
 
         with Span("agent.react") as span:
             span.set_attribute("sagent.max_iterations", self.config.max_iterations)
@@ -209,6 +238,11 @@ class ReActEngine:
                     extra={"event": "react_iteration", "iteration": iteration},
                 )
                 messages = cm.get_messages()
+                if plan_projection:
+                    messages = [
+                        *messages,
+                        {"role": "system", "content": plan_projection},
+                    ]
                 response = self._chat(messages, tools=tools)
                 cm.record_llm_usage(response.usage)
 

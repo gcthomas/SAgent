@@ -72,7 +72,7 @@ def _react_engine(
     return ReActEngine(
         llm,
         build_default_registry(),
-        AgentConfig(mode="react", max_iterations=max_iterations),
+        AgentConfig(max_iterations=max_iterations),
         on_event=on_event,
         context_manager=context_manager,
     )
@@ -85,7 +85,7 @@ def _run_react(scenario: Scenario, llm: FakeLLMClient, tmp_path: Path) -> tuple[
         result = PlanEngine(
             llm,
             build_default_registry(),
-            AgentConfig(mode="plan", max_iterations=scenario.max_iterations),
+            AgentConfig(max_iterations=scenario.max_iterations),
         ).run(scenario.task)
     else:
         result = _react_engine(
@@ -390,7 +390,7 @@ def memory_security_block() -> Scenario:
         engine = ReActEngine(
             llm,
             registry,
-            AgentConfig(mode="react", max_iterations=5),
+            AgentConfig(max_iterations=5),
             on_event=events.append,
         )
         result = engine.run(scenario.task)

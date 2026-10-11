@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from conftest import text_response, tool_response
 
+from sagent.config.models import ContextConfig, PlanningConfig
+from sagent.context.context_manager import ContextManager
 from sagent.core.events import AgentEvent
 from sagent.core.plan_engine import PlanEngine
 from sagent.tools import build_default_registry
@@ -109,3 +111,99 @@ def test_plan_step_uses_tool(make_fake_llm, agent_config, tmp_path):
 
     assert result == "汇总：读取成功"
     assert llm.remaining == 0
+
+
+def test_plan_error_result_replans_and_passes_observation_and_artifacts(make_fake_llm, agent_config):
+    context_manager = ContextManager(
+        ContextConfig(enable_summary=False, max_context_tokens=100000)
+    )
+    llm = make_fake_llm(
+        [
+            text_response('{"steps": ["步骤一", "步骤二"]}'),
+            text_response("错误: 第一次失败"),
+            text_response('{"steps": ["修复步骤一", "步骤二"]}'),
+            text_response("步骤一完成，产物 https://example.test/output.txt"),
+            text_response("步骤二完成"),
+            text_response("汇总"),
+        ]
+    )
+    engine = PlanEngine(
+        llm,
+        build_default_registry(),
+        agent_config,
+        context_manager=context_manager,
+        planning_config=PlanningConfig(max_replans=1),
+    )
+    engine.run("任务")
+
+    replan_messages = llm.calls[2]["messages"]
+    assert "错误: 第一次失败" in replan_messages[-1]["content"]
+    second_step_messages = llm.calls[4]["messages"]
+    projection = second_step_messages[-1]["content"]
+    assert "步骤一完成，产物 https://example.test/output.txt" in projection
+    assert "https://example.test/output.txt" in projection
+    assert engine.plan_state is not None
+    assert engine.plan_state.steps[0].artifact_refs == ["https://example.test/output.txt"]
+    assert engine.plan_state.version == 2
+    assert engine.plan_state.replanning_count == 1
+    assert engine.plan_state.steps[0].description == "修复步骤一"
+    assert not any(
+        message.get("role") == "system" and "[计划投影]" in (message.get("content") or "")
+        for message in context_manager.get_messages()
+    )
+
+
+def test_plan_error_result_blocks_after_replan_limit(make_fake_llm, agent_config):
+    llm = make_fake_llm(
+        [
+            text_response('{"steps": ["执行步骤"]}'),
+            text_response("阻塞收尾"),
+        ]
+    )
+    engine = PlanEngine(
+        llm,
+        build_default_registry(),
+        agent_config,
+        planning_config=PlanningConfig(max_replans=0),
+    )
+    engine._react.run = lambda *args, **kwargs: "错误: 工具执行失败"
+
+    result = engine.run("任务")
+
+    assert "未完全完成" in result
+    assert engine.plan_state is not None
+    assert engine.plan_state.steps[0].status == "blocked"
+    assert engine.plan_state.status == "blocked"
+
+
+def test_plan_replans_failed_step_with_limit(make_fake_llm, agent_config):
+    """步骤异常时有限重试，耗尽次数后保留 blocked 状态。"""
+    llm = make_fake_llm([
+        text_response('{"steps": ["执行步骤"]}'),
+        text_response('{"steps": ["替代步骤"]}'),
+    ])
+    events: list[AgentEvent] = []
+    engine = PlanEngine(
+        llm,
+        build_default_registry(),
+        agent_config,
+        on_event=events.append,
+        planning_config=PlanningConfig(max_replans=1),
+    )
+    attempts = 0
+
+    def fail_step(*args, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        raise RuntimeError("步骤不可执行")
+
+    engine._react.run = fail_step
+    result = engine.run("需要重规划的任务")
+
+    assert "未完全完成" in result
+    assert attempts == 2
+    assert engine.plan_state is not None
+    assert engine.plan_state.replans == 1
+    assert engine.plan_state.status == "blocked"
+    assert engine.plan_state.blocked is not None
+    assert any(event.event_type == "plan_replanned" for event in events)

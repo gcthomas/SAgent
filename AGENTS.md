@@ -4,7 +4,7 @@
 
 ## 项目概述
 
-SAgent 是基于 Python 3.10+ 的 CLI Agent 应用，使用 OpenAI 兼容 API，支持 ReAct 与 Plan 执行模式、工具调用、MCP 扩展、会话与长期记忆，以及 OpenTelemetry 可观测性。
+SAgent 是基于 Python 3.10+ 的 CLI Agent 应用，使用 OpenAI 兼容 API，支持 ReAct 执行循环与自适应计划（Plan）能力、工具调用、MCP 扩展、会话与长期记忆，以及 OpenTelemetry 可观测性。
 
 ## 核心目录
 
@@ -42,9 +42,10 @@ Copy-Item config.example.yaml config.yaml
 # 默认运行
 python main.py
 
-# 指定执行模式或配置
-python main.py --mode react
-python main.py --config config.yaml --mode plan
+# 指定配置文件运行
+python main.py --config config.yaml
+
+# 计划策略仅通过配置项 planning.strategy 控制（adaptive / always / never）
 
 # 运行离线测试
 python -m pytest

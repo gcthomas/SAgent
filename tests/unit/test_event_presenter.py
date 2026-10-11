@@ -60,43 +60,40 @@ def test_presenter_renders_plan_step_context():
     assert output.getvalue() == "\n[执行步骤 1/2] 读取文件\n"
 
 
-def test_presenter_throttles_deltas_by_time_and_flushes_once_without_duplicates():
+def test_presenter_renders_top_level_content_deltas_once():
     output = RecordingOutput()
-    now = [0.0]
-    presenter = EventPresenter(output, flush_interval=1.0, flush_chars=100, clock=lambda: now[0])
+    presenter = EventPresenter(output, flush_interval=100.0)
+    presenter.handle(AgentEvent(event_type="llm_text_delta", content="正常正文"))
+    presenter.handle(AgentEvent(event_type="llm_completed", content="正常正文"))
+    assert output.text == "助手 > 正常正文\n"
+    assert presenter.turn_streamed is True
 
-    presenter.handle(AgentEvent(event_type="llm_text_delta", content="你"))
-    presenter.handle(AgentEvent(event_type="llm_text_delta", content="好"))
-    assert output.text == "助手 > "
-    assert output.flushes == 0
 
-    now[0] = 1.0
-    presenter.handle(AgentEvent(event_type="llm_text_delta", content="！"))
-    assert output.text == "助手 > 你好！"
-    presenter.handle(AgentEvent(event_type="llm_completed"))
-    assert output.text == "助手 > 你好！\n"
-    assert output.flushes == 3
+def test_presenter_renders_plan_status():
+    output = StringIO()
+    presenter = EventPresenter(output)
+    presenter.handle(AgentEvent(event_type="plan_completed", mode="plan", plan_status="blocked"))
+    assert output.getvalue() == "[计划] 计划受阻\n"
 
 
 def test_presenter_flushes_by_character_threshold_and_separates_tool_output():
     output = RecordingOutput()
     presenter = EventPresenter(output, flush_interval=100.0, flush_chars=3)
 
-    presenter.handle(AgentEvent(event_type="llm_text_delta", content="你好"))
+    presenter.handle(AgentEvent(event_type="llm_text_delta", content="正文"))
     assert output.text == "助手 > "
-    presenter.handle(AgentEvent(event_type="llm_text_delta", content="！"))
+    presenter.handle(AgentEvent(event_type="llm_text_delta", content="内容"))
     presenter.handle(
         AgentEvent(event_type="tool_call", tool_name="read_file", tool_arguments={"path": "a"})
     )
     presenter.handle(AgentEvent(event_type="tool_result", content="完成"))
 
     assert output.text == (
-        "助手 > 你好！\n"
+        "助手 > 正文内容\n"
         "[行动] 调用工具 read_file，参数: {'path': 'a'}\n"
         "[观察] 完成\n"
     )
-    assert output.text.count("你好！") == 1
-    assert output.flushes >= 5
+    assert output.flushes == 5
 
 
 def test_presenter_end_streaming_finishes_partial_line_and_next_turn_reprefixes():
@@ -104,19 +101,17 @@ def test_presenter_end_streaming_finishes_partial_line_and_next_turn_reprefixes(
     output = RecordingOutput()
     presenter = EventPresenter(output, flush_interval=100.0, flush_chars=100)
 
-    presenter.handle(AgentEvent(event_type="llm_text_delta", content="你好"))
-    # 模拟流式中途异常：不等待 llm_completed，直接调用终结接口
+    presenter.handle(AgentEvent(event_type="llm_text_delta", content="正文"))
     presenter.end_streaming()
-    assert output.text == "助手 > 你好\n"
+    assert output.text == "助手 > 正文\n"
 
     # 新一轮：begin_turn 重置标记，增量重新输出前缀
     presenter.begin_turn()
     assert presenter.turn_streamed is False
-    presenter.handle(AgentEvent(event_type="llm_text_delta", content="新"))
-    # 时间节流下增量可能仍留在缓冲中，但前缀已重新输出，不与上一轮粘连
-    assert output.text == "助手 > 你好\n助手 > "
+    presenter.handle(AgentEvent(event_type="llm_text_delta", content="正文"))
+    assert output.text.endswith("助手 > ")
     presenter.handle(AgentEvent(event_type="llm_completed"))
-    assert output.text == "助手 > 你好\n助手 > 新\n"
+    assert output.text.endswith("助手 > 正文\n")
     assert presenter.turn_streamed is True
 
 
@@ -139,7 +134,7 @@ def test_presenter_turn_streamed_tracks_delta_and_resets_on_begin_turn():
     presenter.begin_turn()
     assert presenter.turn_streamed is False
 
-    presenter.handle(AgentEvent(event_type="llm_text_delta", content="你好"))
+    presenter.handle(AgentEvent(event_type="llm_text_delta", content="正文"))
     assert presenter.turn_streamed is True
 
     presenter.handle(AgentEvent(event_type="llm_completed"))

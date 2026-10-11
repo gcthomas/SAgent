@@ -13,7 +13,7 @@ from sagent.config.loader import (
     ConfigError,
     load_config,
 )
-from sagent.config.models import PermissionConfig
+from sagent.config.models import PermissionConfig, PlanningConfig
 
 
 def _write_config(tmp_path, text: str):
@@ -35,8 +35,11 @@ context:
     model: gpt-4o-mini
     api_key: sk-summary
 agent:
-  mode: plan
   max_iterations: 3
+planning:
+  strategy: always
+  max_steps: 6
+  max_replans: 4
 """,
     )
     config = load_config(str(path))
@@ -46,8 +49,23 @@ agent:
     assert config.llm.stream is True
     assert config.context.summary_llm is not None
     assert config.context.summary_llm.api_key == "sk-summary"
-    assert config.agent.mode == "plan"
     assert config.agent.max_iterations == 3
+    assert config.planning.strategy == "always"
+    assert config.planning.max_steps == 6
+    assert config.planning.max_replans == 4
+
+
+def test_planning_config_defaults_and_validation():
+    config = PlanningConfig()
+    assert config.strategy == "adaptive"
+    assert config.max_steps == 10
+    assert config.max_replans == 2
+    with pytest.raises(ValidationError):
+        PlanningConfig(strategy="invalid")
+    with pytest.raises(ValidationError):
+        PlanningConfig(max_steps=0)
+    with pytest.raises(ValidationError):
+        PlanningConfig(max_replans=-1)
 
 
 def test_llm_stream_can_be_disabled(tmp_path):

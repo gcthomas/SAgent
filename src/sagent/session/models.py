@@ -30,6 +30,7 @@ class SessionMeta(BaseModel):
     message_count: int = Field(default=0, description="消息条数")
     # 已持久化的最大 seq 游标
     persisted_seq: int = Field(default=0, description="已持久化的最大 seq 游标")
+    plan_state: dict | None = Field(default=None, description="活动计划的结构化快照")
 
 
 class SessionMessage(BaseModel):

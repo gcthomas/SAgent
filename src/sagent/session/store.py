@@ -73,10 +73,14 @@ class SessionStore:
                 updated_at TEXT NOT NULL,
                 mode TEXT NOT NULL,
                 message_count INTEGER NOT NULL DEFAULT 0,
-                persisted_seq INTEGER NOT NULL DEFAULT 0
+                persisted_seq INTEGER NOT NULL DEFAULT 0,
+                plan_state TEXT
             )
             """
         )
+        columns = {row["name"] for row in self._conn.execute("PRAGMA table_info(sessions)")}
+        if "plan_state" not in columns:
+            self._conn.execute("ALTER TABLE sessions ADD COLUMN plan_state TEXT")
         self._conn.execute(
             """
             CREATE TABLE IF NOT EXISTS messages (
@@ -207,12 +211,16 @@ class SessionStore:
         参数:
             session: 会话元数据
         """
+        # plan_state 为 dict | None，写入前需序列化为 JSON 字符串（与 save_plan_state 保持一致）
+        serialized_plan_state = (
+            json.dumps(session.plan_state, ensure_ascii=False) if session.plan_state is not None else None
+        )
         with self._conn:
             self._conn.execute(
                 """
                 INSERT INTO sessions
-                    (id, title, created_at, updated_at, mode, message_count, persisted_seq)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                    (id, title, created_at, updated_at, mode, message_count, persisted_seq, plan_state)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     session.id,
@@ -222,8 +230,15 @@ class SessionStore:
                     session.mode,
                     session.message_count,
                     session.persisted_seq,
+                    serialized_plan_state,
                 ),
             )
+
+    def save_plan_state(self, session_id: str, plan_state: dict | None) -> None:
+        """保存会话的活动计划快照。"""
+        serialized = json.dumps(plan_state, ensure_ascii=False) if plan_state is not None else None
+        with self._conn:
+            self._conn.execute("UPDATE sessions SET plan_state = ? WHERE id = ?", (serialized, session_id))
 
     def list_sessions(self, limit: int | None = None, offset: int = 0) -> list[SessionMeta]:
         """按更新时间与 id 降序返回会话，可指定数量与偏移。
@@ -236,7 +251,7 @@ class SessionStore:
             会话元数据列表，最近更新的排在最前
         """
         query = """
-            SELECT id, title, created_at, updated_at, mode, message_count, persisted_seq
+            SELECT id, title, created_at, updated_at, mode, message_count, persisted_seq, plan_state
             FROM sessions
             ORDER BY updated_at DESC, id DESC
         """
@@ -256,6 +271,7 @@ class SessionStore:
                 mode=row["mode"],
                 message_count=row["message_count"],
                 persisted_seq=row["persisted_seq"],
+                plan_state=json.loads(row["plan_state"]) if row["plan_state"] else None,
             )
             for row in rows
         ]
@@ -271,7 +287,7 @@ class SessionStore:
         """
         cur = self._conn.execute(
             """
-            SELECT id, title, created_at, updated_at, mode, message_count, persisted_seq
+            SELECT id, title, created_at, updated_at, mode, message_count, persisted_seq, plan_state
             FROM sessions
             WHERE id = ?
             """,
@@ -289,6 +305,7 @@ class SessionStore:
             mode=row["mode"],
             message_count=row["message_count"],
             persisted_seq=row["persisted_seq"],
+            plan_state=json.loads(row["plan_state"]) if row["plan_state"] else None,
         )
 
     def rename_session(self, session_id: str, new_title: str, updated_at: str) -> bool:
