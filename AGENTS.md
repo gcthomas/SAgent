@@ -17,6 +17,8 @@ src/sagent/core/            ReAct / Plan 执行引擎
 src/sagent/context/         上下文预算、Token 统计与压缩
 src/sagent/session/         会话持久化与会话管理
 src/sagent/memory/          长期记忆存储、安全扫描与管理
+src/sagent/permissions/     工具权限策略、执行与审批
+src/sagent/observability/   OpenTelemetry 可观测性（日志、指标、追踪与脱敏）
 src/sagent/tools/           内置工具、注册表与 MCP 接入
 tests/unit/                 单元测试
 tests/engines/              ReAct / Plan 引擎测试
@@ -24,6 +26,8 @@ tests/evals/                Agent 能力评测
 ```
 
 涉及某个模块时，先阅读该目录下的当前实现和对应测试；不要以本文替代源码或测试中的实现事实。
+
+模块职责与依赖分层、单次请求全链路数据流的整体视图见 `docs/architecture.md`；需要理解跨模块协作时先读该文件，再定位具体源码。
 
 ## 环境与命令
 
