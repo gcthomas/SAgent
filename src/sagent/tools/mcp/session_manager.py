@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import os
 import threading
 import time
 from typing import Any
@@ -51,6 +52,8 @@ class MCPSessionManager:
         # 命令队列与 worker task
         self._cmd_queue: asyncio.Queue | None = None
         self._worker_task: asyncio.Task | None = None
+        # stdio 子进程 stderr 目标（惰性打开），避免默认接到交互式控制台
+        self._errlog: Any | None = None
 
     def start(self) -> None:
         """启动后台事件循环线程（daemon 线程）。"""
@@ -155,6 +158,18 @@ class MCPSessionManager:
                 )
                 return []
 
+    def _get_errlog(self) -> Any:
+        """获取 stdio 子进程的 stderr 输出目标（惰性打开，全局共享）。
+
+        mcp 的 stdio_client 默认将子进程 stderr 连接到 sys.stderr。
+        在交互式控制台下运行 Agent 时，子进程 stderr 会被接到真实控制台，
+        导致 stdio 握手（session.initialize）永久挂起，最终表现为连接超时。
+        这里显式指向 os.devnull，避免子进程 stderr 接入控制台。
+        """
+        if self._errlog is None:
+            self._errlog = open(os.devnull, "w", encoding="utf-8")
+        return self._errlog
+
     async def _connect(self, config: MCPServerConfig) -> list:
         """异步连接 MCP 服务器。
 
@@ -176,7 +191,8 @@ class MCPSessionManager:
                     env=config.env or None,
                     cwd=config.cwd or None,
                 )
-                transport_cm = stdio_client(params)
+                # 显式指定非控制台的 errlog，避免子进程 stderr 接入交互式控制台
+                transport_cm = stdio_client(params, errlog=self._get_errlog())
             elif config.transport == "sse":
                 transport_cm = sse_client(config.url)
             elif config.transport == "streamable_http":
@@ -327,6 +343,16 @@ class MCPSessionManager:
         # 等待线程结束
         if self._thread is not None:
             self._thread.join(timeout=5.0)
+        # 关闭 stdio 子进程 stderr 目标句柄
+        if self._errlog is not None:
+            try:
+                self._errlog.close()
+            except Exception as exc:
+                logger.warning(
+                    "关闭 MCP stderr 目标失败",
+                    extra={"event": "mcp_errlog_close_error", "error": str(exc)},
+                )
+            self._errlog = None
         self._loop = None
         self._thread = None
 
