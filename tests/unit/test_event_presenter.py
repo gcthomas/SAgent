@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import sys
 from io import StringIO
 
-from sagent.cli.event_presenter import EventPresenter
+from sagent.cli.event_presenter import EventPresenter, StdoutAdapter
 from sagent.core.events import AgentEvent
 
 
@@ -142,3 +143,25 @@ def test_presenter_turn_streamed_tracks_delta_and_resets_on_begin_turn():
 
     presenter.begin_turn()
     assert presenter.turn_streamed is False
+
+
+def test_stdout_adapter_forwards_to_wrapped_stream():
+    """StdoutAdapter 将写入与刷新转发给被包装的文本流。"""
+    stream = StringIO()
+    adapter = StdoutAdapter(stream)
+
+    adapter.write("片段")
+    adapter.flush()
+
+    assert stream.getvalue() == "片段"
+
+
+def test_stdout_adapter_defaults_to_sys_stdout(monkeypatch):
+    """未显式提供流时，StdoutAdapter 写入当前 sys.stdout。"""
+    stream = StringIO()
+    monkeypatch.setattr(sys, "stdout", stream)
+
+    adapter = StdoutAdapter()
+    adapter.write("默认流")
+
+    assert stream.getvalue() == "默认流"

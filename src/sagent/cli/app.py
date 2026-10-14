@@ -10,8 +10,6 @@ import argparse
 import sys
 from pathlib import Path
 
-from prompt_toolkit.output import create_output
-
 from ..config.loader import ConfigError, load_config
 from ..config.models import AppConfig, PermissionConfig, PlanningConfig
 from ..context.context_manager import ContextManager
@@ -33,7 +31,7 @@ from ..terminal_input import TerminalInput
 from ..tools import AddMemoryTool, RemoveMemoryTool, ReplaceMemoryTool, build_default_registry
 from ..tools.mcp import MCPSessionManager, build_mcp_providers
 from .commands import ParsedCommand, parse_command
-from .event_presenter import EventPresenter
+from .event_presenter import EventPresenter, StdoutAdapter
 
 # 退出命令
 _EXIT_COMMANDS = {"exit", "quit", ":q"}
@@ -301,7 +299,7 @@ def _run_interactive(config: AppConfig, reader: TerminalInput) -> int:
         # 不在启动时自动创建会话，延迟到首次用户输入时按需创建，
         # 避免用户直接退出或仅浏览历史时产生垃圾空会话
 
-    presenter = EventPresenter(create_output())
+    presenter = EventPresenter(StdoutAdapter(sys.stdout))
     engine = build_engine(
         llm,
         registry,

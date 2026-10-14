@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import sys
 import time
-from typing import Callable, Protocol
+from typing import Callable, Protocol, TextIO
 
 from prompt_toolkit.output import Output, create_output
 
@@ -18,6 +19,22 @@ class OutputAdapter(Protocol):
 
     def flush(self) -> None:
         """刷新已写入的文本。"""
+
+
+class StdoutAdapter:
+    """把文本流适配为 Presenter 的最小写入协议，默认包装 sys.stdout。"""
+
+    def __init__(self, stream: TextIO | None = None) -> None:
+        """初始化适配器；stream 为空时写入当前 sys.stdout。"""
+        self._stream = sys.stdout if stream is None else stream
+
+    def write(self, data: str) -> None:
+        """向被包装的文本流写入文本。"""
+        self._stream.write(data)
+
+    def flush(self) -> None:
+        """刷新被包装的文本流。"""
+        self._stream.flush()
 
 
 class EventPresenter:

@@ -68,19 +68,6 @@ class _InteractiveReader:
         return next(self.inputs)
 
 
-class _RecordingOutput:
-    """记录 CLI 展示器写入的终端文本。"""
-
-    def __init__(self) -> None:
-        self.text = ""
-
-    def write(self, data: str) -> None:
-        self.text += data
-
-    def flush(self) -> None:
-        pass
-
-
 @pytest.fixture
 def interactive_config():
     """构造不触碰外部资源的交互配置。"""
@@ -110,7 +97,6 @@ def test_run_interactive_final_output_deduplicates_streaming_and_plan_text(
     monkeypatch, capsys, interactive_config, name, stream, strategy, mode, scope, delta, answer
 ):
     """通过 _run_interactive 验证流式正文、完整响应和 Plan 作用域的最终输出。"""
-    output = _RecordingOutput()
 
     class _Engine:
         def __init__(self, on_event):
@@ -142,13 +128,12 @@ def test_run_interactive_final_output_deduplicates_streaming_and_plan_text(
     monkeypatch.setattr(
         cli_app, "build_engine", lambda *args, on_event, **kwargs: _Engine(on_event)
     )
-    monkeypatch.setattr(cli_app, "create_output", lambda: output)
     monkeypatch.setattr(cli_app, "flush_metrics", lambda: None)
     monkeypatch.setattr(cli_app, "close_observability", lambda: None)
 
     cli_app._run_interactive(interactive_config(stream, strategy), _InteractiveReader())
 
-    rendered = output.text + capsys.readouterr().out
+    rendered = capsys.readouterr().out
     assert rendered.count(f"助手 > {answer}\n") == 1, name
     if scope == "plan_step":
         assert delta not in rendered

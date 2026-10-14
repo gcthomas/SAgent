@@ -14,7 +14,7 @@
 
 ## Impact
 - Affected specs: CLI 交互输出、LLM 客户端、ReAct/Plan Agent 事件、配置加载、测试。
-- Affected code: `src/sagent/config/models.py`、`config.example.yaml`、`src/sagent/llm/client.py`、`src/sagent/core/events.py`、`src/sagent/core/react_engine.py`、`src/sagent/core/plan_engine.py`、`src/sagent/cli/event_presenter.py`、相关测试。
+- Affected code: `src/sagent/config/models.py`、`config.example.yaml`、`src/sagent/llm/client.py`、`src/sagent/core/events.py`、`src/sagent/core/react_engine.py`、`src/sagent/core/plan_engine.py`、`src/sagent/cli/event_presenter.py`、`src/sagent/cli/app.py`、相关测试。
 - 不新增生产依赖，使用现有 OpenAI SDK 的 Chat Completions streaming 能力。
 
 ## 推荐方案
@@ -59,25 +59,27 @@ llm:
 - **增量节流**：追加到内存缓冲，按最小时间间隔或累计字符数输出新增内容，在文本结束、工具调用、工具结果、错误和中断等边界强制刷新。它既能保持首字节低延迟，也能减少高频终端写入，是本项目的主要方案。
 
 ### 6. 是否采用 prompt_toolkit 行缓冲/渲染能力
-当前项目已经用 `prompt_toolkit.PromptSession` 处理输入，但模型执行期间没有同时接受用户输入，因此不需要把助手输出纳入 prompt_toolkit 的全屏 Application 重绘循环。prompt_toolkit 的 `Output` 抽象适合统一 Windows/ANSI 输出和测试注入；`patch_stdout` 适合后台任务与输入提示并发写入，但本任务的响应阶段没有并发输入场景。
+当前项目已经用 `prompt_toolkit.PromptSession` 处理输入，但模型执行期间没有同时接受用户输入，因此不需要把助手输出纳入 prompt_toolkit 的全屏 Application 重绘循环。`PromptSession` 的 `Output` 只服务于输入侧渲染；助手输出与启动信息、最终答案、错误提示保持一致，统一写入 `sys.stdout`。`patch_stdout` 适合后台任务与输入提示并发写入，但本任务的响应阶段没有并发输入场景。
 
-因此推荐采用“**prompt_toolkit Output 作为输出适配层 + 自有增量节流 Presenter**”，而不是采用纯粹的“遇换行才刷新的行缓冲”或全屏重绘：
+需要特别说明：在 Windows 上 `prompt_toolkit.output.create_output()` 会返回直写控制台句柄的 `Win32Output`/`Windows10_Output`，绕过 `sys.stdout`。这会使过程输出与其余 `print` 输出位于两条不同通道，在 IDE/管道捕获场景中出现显示缺失或截断。为消除该差异，助手输出统一改走 `sys.stdout`。
 
-- Presenter 通过注入的 `prompt_toolkit.output.Output` 写入并 flush，不直接绑定 `sys.stdout`；保留 `StringIO` 等测试输出适配能力。
+因此推荐采用“**基于 `sys.stdout` 的最小写入适配器 + 自有增量节流 Presenter**”，而不是采用纯粹的“遇换行才刷新的行缓冲”、全屏 prompt_toolkit 重绘，或让 Presenter 直接绑定 prompt_toolkit `Output`：
+
+- Presenter 通过注入的最小写入/刷新适配器输出：生产环境由 `StdoutAdapter` 包装 `sys.stdout`，测试环境注入 `StringIO` 等可记录的内存适配器，不让测试依赖真实终端。
 - 使用单一追加光标，只输出尚未刷新的文本；禁止清屏、光标上移和整段重绘，避免闪烁。
 - 文本增量进入 Presenter 缓冲区后，满足时间/字符阈值之一即写出；遇到换行可以立即刷新，但不能把换行作为唯一刷新条件。
 - 文本流开始输出一次 `助手 > `；文本流结束或切换到工具/状态事件时强制 flush 并补换行，确保不同事件不粘连。
 - 若未来支持响应过程中继续编辑输入、spinner 或并发后台事件，再引入 `patch_stdout` 或完整 prompt_toolkit Application；本期不为不存在的并发场景增加复杂度。
 
-结论：本项目采用“prompt_toolkit Output + 增量节流”。Output 只负责终端写入、flush 和平台适配，节流 Presenter 负责流式增量的缓存与追加式刷新；纯行缓冲会牺牲体验，全屏 prompt_toolkit 重绘则超出需求且增加光标状态管理成本。Presenter 的输出依赖应抽象为最小写入/刷新协议，以便生产环境使用 prompt_toolkit Output、测试环境使用可记录的内存适配器，不让测试依赖真实终端。
+结论：本项目采用“`sys.stdout` 适配器 + 增量节流”。适配器只负责终端写入与 flush，节流 Presenter 负责流式增量的缓存与追加式刷新；纯行缓冲会牺牲体验，全屏 prompt_toolkit 重绘则超出需求且增加光标状态管理成本。Presenter 的输出依赖应抽象为最小写入/刷新协议，以便生产环境包装 `sys.stdout`、测试环境使用可记录的内存适配器，不让测试依赖真实终端。
 
 ### 7. 业界方案对比与本项目选择
 - **OpenAI Agents SDK**：以 run stream events 暴露 raw response text delta、tool called、tool output 和完成状态；优点是事件边界清晰，适合 Agent 生命周期，缺点是其事件模型不能直接复用本项目现有同步引擎。
 - **Claude Agent SDK / Claude Code**：通过 partial message stream 提供 `text_delta`、工具调用 block 和 block stop；优点是文本块与工具块分离，工具参数可增量聚合，缺点是需要处理更细粒度的底层事件。
 - **直接消费 OpenAI Chat Completions SSE**：实现成本最低，适合本项目已有 OpenAI 兼容客户端；但 SDK chunk 结构不应泄漏到 CLI，否则未来更换供应商会扩大改动范围。
-- **prompt_toolkit 输出/渲染**：适合交互式输入、终端输出抽象、并发打印和复杂重绘；本项目已有其输入能力，但当前同步响应不需要全屏重绘。采用其 `Output` 通道即可获得兼容性，不将助手文本改造成全屏布局。
+- **prompt_toolkit 输出/渲染**：适合交互式输入、终端输出抽象、并发打印和复杂重绘；本项目已有其输入能力，但当前同步响应不需要全屏重绘。其 `Output` 通道在 Windows 上绕过 `sys.stdout`，会与其余输出形成双通道差异，故助手输出改走 `sys.stdout`，不采用其 `Output` 渲染助手文本。
 
-本项目选择“OpenAI Chat Completions 流式传输 + 内部结构化事件 + prompt_toolkit Output + 增量节流 Presenter”：保留现有同步 ReAct/Plan 循环，借鉴 Claude 的 block 聚合和 OpenAI Agents 的生命周期事件，并通过追加式输出与边界 flush 减少终端闪烁。
+本项目选择“OpenAI Chat Completions 流式传输 + 内部结构化事件 + `sys.stdout` 适配器 + 增量节流 Presenter”：保留现有同步 ReAct/Plan 循环，借鉴 Claude 的 block 聚合和 OpenAI Agents 的生命周期事件，并通过追加式输出与边界 flush 减少终端闪烁。
 
 参考：
 - [OpenAI Agents SDK Streaming](https://openai.github.io/openai-agents-python/streaming/)
