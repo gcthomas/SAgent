@@ -219,20 +219,22 @@ class PlanEngine:
                 while True:
                     step = self.plan_state.steps[idx - 1].description
                     steps = [item.description for item in self.plan_state.steps]
+                    # 原始任务已在共享上下文中持久化，且计划投影也携带，故步骤指令
+                    # 只保留当前步骤，避免重复占用上下文预算。
                     step_task = (
-                        f"原始任务: {task}\n"
                         f"当前需要完成的步骤: {step}\n"
                         f"请完成该步骤并给出结果。"
                     )
                     self._step_context = (idx, len(steps), step)
                     self.plan_state.steps[idx - 1].status = "running"
                     try:
-                        # 投影只进入请求；共享上下文已有原始任务，不再持久化子步骤提示。
+                        # 步骤指令必须作为 user 消息持久化：否则历史以助手消息结尾、
+                        # 再收尾一条 system 投影，模型会把该结构当成无待办轮次而返回空响应。
                         result = self._react.run(
                             step_task,
                             memory_prefix=memory_prefix,
                             plan_projection=self.plan_state.projection(self._recent_observation),
-                            persist_task=self._context_manager is None,
+                            persist_task=True,
                         )
                     except Exception as exc:
                         # 异常与错误结果共享计划级重规划上限，耗尽后标记 blocked。

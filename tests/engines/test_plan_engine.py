@@ -113,6 +113,52 @@ def test_plan_step_uses_tool(make_fake_llm, agent_config, tmp_path):
     assert llm.remaining == 0
 
 
+def test_plan_persists_step_instruction_as_user_message(make_fake_llm, agent_config):
+    """注入 ContextManager 时，步骤指令应作为 user 消息持久化。
+
+    回归防护：若步骤指令不写入历史，步骤 2 的请求历史会以助手消息结尾、再收尾一条
+    system 投影，模型易返回空响应。此处断言每个步骤指令都作为 user 消息进入历史，
+    且步骤 2 的请求在收尾投影之前紧邻一条 user 消息；同时计划投影仍不得写入历史。
+    """
+    context_manager = ContextManager(
+        ContextConfig(enable_summary=False, max_context_tokens=100000)
+    )
+    llm = make_fake_llm(
+        [
+            text_response('{"steps": ["步骤一", "步骤二"]}'),
+            text_response("步骤一完成"),
+            text_response("步骤二完成"),
+            text_response("汇总"),
+        ]
+    )
+    engine = PlanEngine(
+        llm, build_default_registry(), agent_config, context_manager=context_manager
+    )
+    assert engine.run("复杂任务") == "汇总"
+
+    user_contents = [
+        message.get("content", "")
+        for message in context_manager.get_messages()
+        if message.get("role") == "user"
+    ]
+    # 原始任务与每个步骤指令均作为 user 消息持久化
+    assert any("复杂任务" in content for content in user_contents)
+    assert any("当前需要完成的步骤: 步骤一" in content for content in user_contents)
+    assert any("当前需要完成的步骤: 步骤二" in content for content in user_contents)
+
+    # 步骤 2 的请求：收尾计划投影之前应紧邻一条 user 消息（步骤指令），而非助手消息
+    step2_messages = llm.calls[2]["messages"]
+    assert "[计划投影]" in step2_messages[-1]["content"]
+    assert step2_messages[-2]["role"] == "user"
+    assert "当前需要完成的步骤: 步骤二" in step2_messages[-2]["content"]
+
+    # 计划投影仍不得写入上下文历史
+    assert not any(
+        message.get("role") == "system" and "[计划投影]" in (message.get("content") or "")
+        for message in context_manager.get_messages()
+    )
+
+
 def test_plan_error_result_replans_and_passes_observation_and_artifacts(make_fake_llm, agent_config):
     context_manager = ContextManager(
         ContextConfig(enable_summary=False, max_context_tokens=100000)

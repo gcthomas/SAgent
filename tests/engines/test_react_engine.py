@@ -6,7 +6,8 @@ import logging
 
 from conftest import make_tool_call, text_response, tool_response
 
-from sagent.config.models import AgentConfig
+from sagent.config.models import AgentConfig, ContextConfig
+from sagent.context.context_manager import ContextManager
 from sagent.core.events import AgentEvent
 from sagent.core.react_engine import ReActEngine
 from sagent.tools import build_default_registry
@@ -139,3 +140,37 @@ def test_react_multiple_tool_calls_in_one_round(make_fake_llm, agent_config, tmp
     assert result == "两文件均已读取"
     tool_msgs = [m for m in llm.calls[1]["messages"] if m.get("role") == "tool"]
     assert {m["tool_call_id"] for m in tool_msgs} == {"c1", "c2"}
+
+
+def test_react_retries_on_empty_response_without_context(make_fake_llm, agent_config):
+    """无上下文管理器时，首轮空响应应追加纠正提示并重试一次。"""
+    llm = make_fake_llm([text_response(""), text_response("补上的答案")])
+    engine = ReActEngine(llm, build_default_registry(), agent_config)
+
+    assert engine.run("问题") == "补上的答案"
+    assert len(llm.calls) == 2
+    # 第二次请求应包含纠正性用户消息
+    assert llm.calls[1]["messages"][-1] == {
+        "role": "user",
+        "content": "请给出当前任务的结果。",
+    }
+
+
+def test_react_retries_on_empty_response_with_context(make_fake_llm, agent_config):
+    """注入上下文管理器时，首轮空响应应追加纠正提示并重试一次。"""
+    context_manager = ContextManager(
+        ContextConfig(enable_summary=False, max_context_tokens=100000)
+    )
+    llm = make_fake_llm([text_response(""), text_response("补上的答案")])
+    engine = ReActEngine(
+        llm, build_default_registry(), agent_config, context_manager=context_manager
+    )
+
+    assert engine.run("问题") == "补上的答案"
+    assert len(llm.calls) == 2
+    # 纠正性用户消息应写入历史
+    assert any(
+        message.get("role") == "user"
+        and message.get("content") == "请给出当前任务的结果。"
+        for message in context_manager.get_messages()
+    )

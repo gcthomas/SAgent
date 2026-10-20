@@ -90,8 +90,9 @@ class ReActEngine:
             plan_projection: 可选的计划状态投影，仅作为本次执行中迭代请求的
                 临时 system 消息，不写入上下文历史，也不持久化计划快照。
             persist_task: 是否将 task 作为 user 消息加入上下文管理器，默认 True。
-                False 用于避免 Plan 子步骤提示写入历史，不影响助手消息和工具
-                结果的记录；无上下文管理器时仍将 task 用于请求，此参数不生效。
+                False 用于避免重复写入已在历史中的输入（如 Plan 拆解失败回退时
+                原始任务已存在），不影响助手消息和工具结果的记录；无上下文管理器
+                时仍将 task 用于请求，此参数不生效。
 
         返回:
             最终答案文本。
@@ -120,6 +121,7 @@ class ReActEngine:
             if plan_projection:
                 messages.append({"role": "system", "content": plan_projection})
 
+            empty_retries = 0
             for iteration in range(1, self.config.max_iterations + 1):
                 span.add_event("iteration", {"index": iteration})
                 logger.debug(
@@ -130,6 +132,18 @@ class ReActEngine:
 
                 # 没有工具调用，视为最终答案
                 if not response.has_tool_calls:
+                    # 空响应（无正文且无工具调用）不应静默当作完成：追加一次纠正性
+                    # 用户消息后重试，避免异常响应被当成最终答案吞掉。
+                    if not (response.content or "").strip() and empty_retries < 1:
+                        empty_retries += 1
+                        logger.warning(
+                            "ReAct 收到空响应，追加纠正提示后重试",
+                            extra={"event": "react_empty_response", "iteration": iteration},
+                        )
+                        messages.append(
+                            {"role": "user", "content": "请给出当前任务的结果。"}
+                        )
+                        continue
                     if response.content:
                         self._emit(
                             AgentEvent(
@@ -231,6 +245,7 @@ class ReActEngine:
         with Span("agent.react") as span:
             span.set_attribute("sagent.max_iterations", self.config.max_iterations)
 
+            empty_retries = 0
             for iteration in range(1, self.config.max_iterations + 1):
                 span.add_event("iteration", {"index": iteration})
                 logger.debug(
@@ -248,6 +263,18 @@ class ReActEngine:
 
                 # 没有工具调用，视为最终答案
                 if not response.has_tool_calls:
+                    # 空响应（无正文且无工具调用）不应静默当作完成：追加一次纠正性
+                    # 用户消息后重试，避免异常响应被当成最终答案并标记步骤完成。
+                    if not (response.content or "").strip() and empty_retries < 1:
+                        empty_retries += 1
+                        logger.warning(
+                            "ReAct 收到空响应，追加纠正提示后重试",
+                            extra={"event": "react_empty_response", "iteration": iteration},
+                        )
+                        cm.add_message(
+                            {"role": "user", "content": "请给出当前任务的结果。"}
+                        )
+                        continue
                     cm.add_message({"role": "assistant", "content": response.content})
                     if response.content:
                         self._emit(
