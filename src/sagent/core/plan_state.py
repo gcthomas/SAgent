@@ -15,6 +15,7 @@ class PlanStepState:
     """单个计划步骤的可审计状态。"""
 
     description: str
+    title: str = ""
     status: StepStatus = "pending"
     summary: str = ""
     artifact_refs: list[str] = field(default_factory=list)
@@ -45,20 +46,27 @@ class PlanState:
         self.replans = value
 
     def projection(self, recent_observation: str = "") -> str:
-        """生成有界计划投影，供单次 LLM 请求使用。"""
+        """生成有界计划投影，供单次 LLM 请求使用。
+
+        只暴露执行进度与下一步标题，不列出后续步骤的完整描述，也不重复
+        step_task 已携带的当前步骤，避免当前步骤把下游步骤当作本轮任务
+        而越界执行。
+        """
         completed = [step.summary[:300] for step in self.steps if step.status == "completed"]
-        remaining = [step.description for step in self.steps if step.status == "pending"]
-        current = self.steps[self.current_step - 1].description if self.current_step else ""
+        pending = [step for step in self.steps if step.status == "pending"]
         observation = recent_observation or self.recent_observation
         artifacts = self.artifact_refs[-10:]
+        next_title = pending[0].title if pending else "无"
         return (
             "[计划投影]\n"
             f"原始任务: {self.task[:500]}\n"
-            f"当前步骤: {current[:500]}\n"
             f"已完成摘要: {' | '.join(completed[-5:])[:1200]}\n"
-            f"剩余步骤: {' | '.join(remaining[:10])[:1200]}\n"
+            f"执行进度: 共 {len(self.steps)} 步，已完成 {len(completed)} 步，待执行 {len(pending)} 步\n"
+            f"下一步: {next_title[:80]}\n"
             f"最近观察: {observation[-1200:]}\n"
-            f"产物引用: {' | '.join(artifacts)[:800]}"
+            f"产物引用: {' | '.join(artifacts)[:800]}\n"
+            "约束: 进度与下一步仅用于了解整体安排，不得提前执行后续步骤，"
+            "也不得为后续步骤调用工具；请只完成当前步骤。"
         )
 
     def to_dict(self) -> dict[str, Any]:

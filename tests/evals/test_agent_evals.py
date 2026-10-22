@@ -289,7 +289,10 @@ def plan_two_step_summary() -> Scenario:
 
     def responses(_: Path) -> list[LLMResponse]:
         return [
-            text_response('{"steps": ["收集信息", "整理信息"]}'),
+            text_response(
+                '{"steps": [{"title": "收集信息", "description": "收集信息"}, '
+                '{"title": "整理信息", "description": "整理信息"}]}'
+            ),
             text_response("收集完成"),
             text_response("整理完成"),
             text_response("汇总：收集完成，整理完成"),

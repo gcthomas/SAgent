@@ -113,7 +113,7 @@ Plan 路径 `PlanEngine.run()`：
 
 1. 确保系统提示词并写入用户原始任务；
 2. `with Span("plan.decompose")` 调用 LLM 拆解步骤，失败则回退 ReAct；
-3. 逐步执行：`with Span("plan.step")`，每步复用 `ReActEngine.run()`，以 `plan_projection` 传入计划状态投影（仅进入当次请求、不写入历史），并将步骤指令作为 user 消息持久化（`persist_task=True`），避免历史以助手消息结尾而触发模型空响应；
+3. 逐步执行：`with Span("plan.step")`，每步复用 `ReActEngine.run()`，以 `plan_projection` 传入计划状态投影（作为当次请求副本的末尾 system 消息、不写入历史），投影只暴露执行进度与下一步标题并附带禁止越界约束，不含当前步骤（由步骤指令携带），避免下游步骤描述被提前执行；并将步骤指令作为 user 消息持久化（`persist_task=True`），避免历史以助手消息结尾而触发模型空响应；
 4. 步骤失败且错误以 `错误:` 开头或抛异常时，在 `planning.max_replans` 内 `_replan()`，耗尽则标记 `blocked` 并停止后续步骤；
 5. `with Span("plan.summarize")` 汇总各步骤结果，`blocked` 时明确报告未完成部分；
 6. 计划状态经 `_on_plan_state_change` 回调（即 `SessionManager.set_active_plan`）持久化为快照；最终汇总作为 assistant 消息写回上下文。

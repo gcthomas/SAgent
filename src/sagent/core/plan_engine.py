@@ -125,8 +125,9 @@ class PlanEngine:
             decompose_span = None
         else:
             with Span("plan.decompose") as decompose_span:
-                steps = self._decompose(task)
-            steps = steps[: self._planning_config.max_steps]
+                step_specs = self._decompose(task)
+            step_specs = step_specs[: self._planning_config.max_steps]
+            steps = [description for _, description in step_specs]
         if not steps:
             # 拆解失败时回退为直接用 ReAct 执行整个任务
             self._emit(
@@ -151,7 +152,10 @@ class PlanEngine:
             self.plan_state = PlanState(
                 version=1,
                 task=task,
-                steps=[PlanStepState(description=step) for step in steps],
+                steps=[
+                    PlanStepState(title=title, description=description)
+                    for title, description in step_specs
+                ],
                 status="executing",
             )
         self.plan_state.status = "executing"
@@ -327,7 +331,10 @@ class PlanEngine:
     def _replan(self, task: str, failed_index: int, observation: str) -> None:
         state = self.plan_state
         completed = [step for step in state.steps if step.status == "completed"]
-        remaining = [step.description for step in state.steps[failed_index - 1 :]]
+        remaining = [
+            (step.title, step.description)
+            for step in state.steps[failed_index - 1 :]
+        ]
         response = self._chat(
             [
                 {"role": "system", "content": PLAN_REPLAN_PROMPT},
@@ -336,7 +343,8 @@ class PlanEngine:
                     "content": (
                         f"原始任务:\n{task}\n已完成步骤:\n"
                         f"{[step.description + ': ' + step.summary for step in completed]}\n"
-                        f"剩余步骤:\n{remaining}\n失败观察:\n{observation[-1200:]}"
+                        f"剩余步骤:\n{[description for _, description in remaining]}\n"
+                        f"失败观察:\n{observation[-1200:]}"
                     ),
                 },
             ],
@@ -346,7 +354,10 @@ class PlanEngine:
         if not revised:
             revised = remaining
         revised = revised[: self._planning_config.max_steps]
-        state.steps = completed + [PlanStepState(description=step) for step in revised]
+        state.steps = completed + [
+            PlanStepState(title=title, description=description)
+            for title, description in revised
+        ]
         state.version += 1
         state.replans += 1
         state.failure = observation[-1200:]
@@ -377,8 +388,8 @@ class PlanEngine:
         if self._on_plan_state_change:
             self._on_plan_state_change(state)
 
-    def _decompose(self, task: str) -> list[str]:
-        """调用 LLM 将任务拆解为步骤列表。解析失败返回空列表。"""
+    def _decompose(self, task: str) -> list[tuple[str, str]]:
+        """调用 LLM 将任务拆解为 (title, description) 列表。解析失败返回空列表。"""
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": PLAN_DECOMPOSE_PROMPT},
             {"role": "user", "content": task},
@@ -388,10 +399,11 @@ class PlanEngine:
         return self._parse_steps(content)
 
     @staticmethod
-    def _parse_steps(content: str) -> list[str]:
-        """从 LLM 输出中解析步骤列表。
+    def _parse_steps(content: str) -> list[tuple[str, str]]:
+        """从 LLM 输出中解析 (title, description) 步骤列表。
 
-        兼容返回内容被 ```json 代码块包裹的情况。
+        兼容返回内容被 ```json 代码块包裹的情况；缺少 title 或 description
+        的条目视为无效并丢弃。解析失败返回空列表。
         """
         text = content
         if text.startswith("```"):
@@ -404,11 +416,58 @@ class PlanEngine:
         try:
             data = json.loads(text)
         except json.JSONDecodeError:
+            logger.warning(
+                "Plan 步骤解析失败：输出不是合法 JSON",
+                extra={
+                    "event": "plan_parse_failed",
+                    "reason": "invalid_json",
+                    "content_preview": content[:200],
+                },
+            )
             return []
         steps = data.get("steps") if isinstance(data, dict) else None
         if not isinstance(steps, list):
+            logger.warning(
+                "Plan 步骤解析失败：缺少 steps 列表",
+                extra={
+                    "event": "plan_parse_failed",
+                    "reason": "steps_not_list",
+                    "data_type": type(data).__name__,
+                    "content_preview": content[:200],
+                },
+            )
             return []
-        return [str(s).strip() for s in steps if str(s).strip()]
+        parsed: list[tuple[str, str]] = []
+        dropped: list[dict[str, Any]] = []
+        for index, item in enumerate(steps):
+            if not isinstance(item, dict):
+                # 记录条目级异常，便于定位模型未按对象契约输出的情况
+                dropped.append({"index": index, "reason": "not_object", "item_type": type(item).__name__})
+                continue
+            title = str(item.get("title", "")).strip()
+            description = str(item.get("description", "")).strip()
+            if title and description:
+                parsed.append((title, description))
+            else:
+                dropped.append(
+                    {
+                        "index": index,
+                        "reason": "missing_fields",
+                        "title_empty": not title,
+                        "description_empty": not description,
+                    }
+                )
+        if dropped:
+            logger.warning(
+                "Plan 步骤解析丢弃无效条目",
+                extra={
+                    "event": "plan_parse_dropped",
+                    "kept_count": len(parsed),
+                    "dropped_count": len(dropped),
+                    "dropped": dropped[:10],
+                },
+            )
+        return parsed
 
     def _summarize(self, task: str, step_results: list[str]) -> str:
         """基于各步骤结果生成最终汇总答案。"""

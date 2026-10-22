@@ -15,7 +15,10 @@ def test_plan_decompose_execute_summarize(make_fake_llm, agent_config):
     """完整流程：拆解 2 步 -> 每步 ReAct 直接答 -> 汇总。"""
     responses = [
         # 1) 拆解
-        text_response('{"steps": ["步骤一", "步骤二"]}'),
+        text_response(
+            '{"steps": [{"title": "标题一", "description": "步骤一"}, '
+            '{"title": "标题二", "description": "步骤二"}]}'
+        ),
         # 2) 步骤一（ReAct 直接答）
         text_response("步骤一完成"),
         # 3) 步骤二（ReAct 直接答）
@@ -44,7 +47,7 @@ def test_plan_streaming_decompose_steps_and_summary(make_fake_llm, agent_config)
     """Plan 拆解不渲染内部 JSON，步骤和汇总复用流式路径。"""
     llm = make_fake_llm(
         [
-            text_response('{"steps": ["步骤一"]}'),
+            text_response('{"steps": [{"title": "标题一", "description": "步骤一"}]}'),
             text_response("步骤完成"),
             text_response("最终汇总"),
         ],
@@ -89,7 +92,7 @@ def test_plan_step_uses_tool(make_fake_llm, agent_config, tmp_path):
 
     responses = [
         # 拆解为 1 步
-        text_response('{"steps": ["读取文件"]}'),
+        text_response('{"steps": [{"title": "读取文件", "description": "读取文件"}]}'),
         # 步骤内：请求工具
         tool_response(
             [
@@ -125,7 +128,10 @@ def test_plan_persists_step_instruction_as_user_message(make_fake_llm, agent_con
     )
     llm = make_fake_llm(
         [
-            text_response('{"steps": ["步骤一", "步骤二"]}'),
+            text_response(
+                '{"steps": [{"title": "标题一", "description": "步骤一"}, '
+                '{"title": "标题二", "description": "步骤二"}]}'
+            ),
             text_response("步骤一完成"),
             text_response("步骤二完成"),
             text_response("汇总"),
@@ -165,9 +171,15 @@ def test_plan_error_result_replans_and_passes_observation_and_artifacts(make_fak
     )
     llm = make_fake_llm(
         [
-            text_response('{"steps": ["步骤一", "步骤二"]}'),
+            text_response(
+                '{"steps": [{"title": "标题一", "description": "步骤一"}, '
+                '{"title": "标题二", "description": "步骤二"}]}'
+            ),
             text_response("错误: 第一次失败"),
-            text_response('{"steps": ["修复步骤一", "步骤二"]}'),
+            text_response(
+                '{"steps": [{"title": "修复标题一", "description": "修复步骤一"}, '
+                '{"title": "标题二", "description": "步骤二"}]}'
+            ),
             text_response("步骤一完成，产物 https://example.test/output.txt"),
             text_response("步骤二完成"),
             text_response("汇总"),
@@ -202,7 +214,7 @@ def test_plan_error_result_replans_and_passes_observation_and_artifacts(make_fak
 def test_plan_error_result_blocks_after_replan_limit(make_fake_llm, agent_config):
     llm = make_fake_llm(
         [
-            text_response('{"steps": ["执行步骤"]}'),
+            text_response('{"steps": [{"title": "执行标题", "description": "执行步骤"}]}'),
             text_response("阻塞收尾"),
         ]
     )
@@ -225,8 +237,8 @@ def test_plan_error_result_blocks_after_replan_limit(make_fake_llm, agent_config
 def test_plan_replans_failed_step_with_limit(make_fake_llm, agent_config):
     """步骤异常时有限重试，耗尽次数后保留 blocked 状态。"""
     llm = make_fake_llm([
-        text_response('{"steps": ["执行步骤"]}'),
-        text_response('{"steps": ["替代步骤"]}'),
+        text_response('{"steps": [{"title": "执行标题", "description": "执行步骤"}]}'),
+        text_response('{"steps": [{"title": "替代标题", "description": "替代步骤"}]}'),
     ])
     events: list[AgentEvent] = []
     engine = PlanEngine(
@@ -253,3 +265,37 @@ def test_plan_replans_failed_step_with_limit(make_fake_llm, agent_config):
     assert engine.plan_state.status == "blocked"
     assert engine.plan_state.blocked is not None
     assert any(event.event_type == "plan_replanned" for event in events)
+
+
+def test_plan_projection_exposes_only_next_step_title(make_fake_llm, agent_config):
+    """计划投影只暴露下一步标题，不泄漏下游描述，也不重复当前步骤。"""
+    llm = make_fake_llm(
+        [
+            text_response(
+                '{"steps": [{"title": "标题一", "description": "描述一"}, '
+                '{"title": "标题二", "description": "描述二"}, '
+                '{"title": "标题三", "description": "描述三"}]}'
+            ),
+            text_response("步骤一完成"),
+            text_response("步骤二完成"),
+            text_response("步骤三完成"),
+            text_response("汇总"),
+        ]
+    )
+    engine = PlanEngine(llm, build_default_registry(), agent_config)
+
+    assert engine.run("复杂任务") == "汇总"
+
+    step1_messages = llm.calls[1]["messages"]
+    projection = step1_messages[-1]["content"]
+    assert projection.startswith("[计划投影]")
+    assert "下一步: 标题二" in projection
+    assert "标题三" not in projection
+    assert "描述一" not in projection
+    assert "描述二" not in projection
+    assert "描述三" not in projection
+    assert "不得提前执行" in projection
+
+    # 当前步骤只由步骤指令携带，投影中不再重复
+    assert step1_messages[-2]["role"] == "user"
+    assert "当前需要完成的步骤: 描述一" in step1_messages[-2]["content"]

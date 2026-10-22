@@ -304,7 +304,10 @@ def test_plan_trace_tree(make_fake_llm, agent_config, obs_env):
     llm = _SpannedLLM(
         make_fake_llm(
             [
-                text_response('{"steps": ["步骤一", "步骤二"]}'),
+                text_response(
+                    '{"steps": [{"title": "标题一", "description": "步骤一"}, '
+                    '{"title": "标题二", "description": "步骤二"}]}'
+                ),
                 text_response("步骤一完成"),
                 text_response("步骤二完成"),
                 text_response("整体汇总结果"),

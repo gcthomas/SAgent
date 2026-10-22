@@ -31,7 +31,7 @@ def test_always_uses_plan_without_decision(make_fake_llm, agent_config):
     """always 策略直接进入计划拆解流程。"""
     llm = make_fake_llm(
         [
-            text_response('{"steps": ["执行步骤"]}'),
+            text_response('{"steps": [{"title": "执行标题", "description": "执行步骤"}]}'),
             text_response("步骤结果"),
             text_response("计划结果"),
         ]
@@ -72,7 +72,7 @@ def test_adaptive_true_enters_plan(make_fake_llm, agent_config):
     llm = make_fake_llm(
         [
             text_response('{"needs_plan": true, "reason": "需要多步协作"}'),
-            text_response('{"steps": ["执行步骤"]}'),
+            text_response('{"steps": [{"title": "执行标题", "description": "执行步骤"}]}'),
             text_response("步骤结果"),
             text_response("计划结果"),
         ]
@@ -139,7 +139,7 @@ def test_plan_projection_is_request_local(make_fake_llm, agent_config):
     )
     llm = make_fake_llm(
         [
-            text_response('{"steps": ["执行步骤"]}'),
+            text_response('{"steps": [{"title": "执行标题", "description": "执行步骤"}]}'),
             text_response("步骤结果"),
             text_response("计划结果"),
         ]

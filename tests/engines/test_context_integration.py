@@ -41,7 +41,7 @@ def test_plan_without_context_manager_unchanged(make_fake_llm, agent_config):
     """
     responses = [
         # 拆解为 1 步
-        text_response('{"steps": ["唯一步骤"]}'),
+        text_response('{"steps": [{"title": "唯一步骤", "description": "唯一步骤"}]}'),
         # 步骤执行（ReAct 直接答）
         text_response("步骤完成结果"),
         # 汇总
