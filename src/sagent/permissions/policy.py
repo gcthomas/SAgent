@@ -226,6 +226,8 @@ class PermissionPolicy:
     先按 last-match-wins 匹配用户规则，未命中任何用户规则时回退内置默认：
     - run_shell 命令文本命中 DANGEROUS_SHELL_PATTERNS -> deny
     - read_file / add_memory / replace_memory / remove_memory -> allow
+    - load_skill / read_skill_resource -> allow（受限只读：仅已发现技能，
+      资源读取限定在技能目录内，且不得读取任意用户指定路径）
     - 工具名以 mcp_ 开头 -> allow
     - 其余（含 write_file、run_shell、未知工具）-> ask
     """
@@ -266,7 +268,14 @@ class PermissionPolicy:
             for pattern, _description in DANGEROUS_SHELL_PATTERNS:
                 if pattern.search(text):
                     return Decision.DENY
-        if request.tool in ('read_file', 'add_memory', 'replace_memory', 'remove_memory'):
+        if request.tool in (
+            'read_file',
+            'add_memory',
+            'replace_memory',
+            'remove_memory',
+            'load_skill',
+            'read_skill_resource',
+        ):
             return Decision.ALLOW
         if request.tool.startswith('mcp_'):
             return Decision.ALLOW

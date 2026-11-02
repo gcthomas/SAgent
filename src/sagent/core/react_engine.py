@@ -78,6 +78,7 @@ class ReActEngine:
         self,
         task: str,
         memory_prefix: str | None = None,
+        skill_prefix: str | None = None,
         plan_projection: str | None = None,
         persist_task: bool = True,
     ) -> str:
@@ -87,6 +88,8 @@ class ReActEngine:
             task: 用户任务/输入。
             memory_prefix: 可选的记忆注入前缀，叠加到 ReAct 系统提示词之前
                 （而非替换）。会话开始时由调用方冻结构建一次，整个会话复用。
+            skill_prefix: 可选的 Skill 目录前缀，叠加到记忆前缀与 ReAct 系统
+                提示词之间。会话开始时由调用方冻结构建一次，整个会话复用。
             plan_projection: 可选的计划状态投影，仅作为本次执行中迭代请求的
                 临时 system 消息，不写入上下文历史，也不持久化计划快照。
             persist_task: 是否将 task 作为 user 消息加入上下文管理器，默认 True。
@@ -98,6 +101,11 @@ class ReActEngine:
             最终答案文本。
         """
         prompt = REACT_SYSTEM_PROMPT
+        # 叠加顺序：memory_prefix 位于最前（与前缀缓存语义一致），
+        # skill_prefix 次之，ReAct 系统提示词最后。
+        # 先叠加 skill_prefix 再叠加 memory_prefix，使 memory 保持在最终提示词最前。
+        if skill_prefix:
+            prompt = skill_prefix + "\n\n" + prompt
         if memory_prefix:
             prompt = memory_prefix + "\n\n" + prompt
         tools = self.registry.to_openai_schemas()

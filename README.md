@@ -18,7 +18,7 @@ SAgent 是一个基于 Python 的 CLI Agent 应用，通过 OpenAI 兼容 API �
 
 ## 环境要求
 
-- Python 3.10+
+- Python 3.12+
 
 ## 安装
 

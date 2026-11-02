@@ -129,6 +129,15 @@ def test_default_policy_mcp_prefix_allow():
     assert _decide("mcp_search", {"query": "x"}) is Decision.ALLOW
 
 
+def test_default_policy_skill_tools_allow():
+    """受限只读的 Skill 工具默认放行，非交互环境下仍可使用。"""
+    assert _decide("load_skill", {"name": "code-review"}) is Decision.ALLOW
+    assert (
+        _decide("read_skill_resource", {"name": "code-review", "path": "references/api.md"})
+        is Decision.ALLOW
+    )
+
+
 def test_default_policy_write_file_ask():
     assert _decide("write_file", {"path": "a.txt", "content": "x"}) is Decision.ASK
 

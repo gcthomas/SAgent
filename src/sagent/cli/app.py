@@ -13,6 +13,7 @@ from pathlib import Path
 from ..config.loader import ConfigError, load_config
 from ..config.models import AppConfig, PermissionConfig, PlanningConfig
 from ..context.context_manager import ContextManager
+from ..context.token_counter import count_text_tokens
 from ..core.agent_engine import AgentEngine
 from ..llm.client import LLMClient
 from ..memory import MemoryManager, MemoryStore
@@ -27,6 +28,7 @@ from ..permissions import (
 )
 from ..session.manager import SessionManager
 from ..session.store import SessionStore
+from ..skills import SkillLoader, SkillManager, SkillNotFoundError, build_skill_catalog_prefix
 from ..terminal_input import TerminalInput
 from ..tools import AddMemoryTool, RemoveMemoryTool, ReplaceMemoryTool, build_default_registry
 from ..tools.mcp import MCPSessionManager, build_mcp_providers
@@ -120,12 +122,16 @@ def _build_permission(
     )
 
 
-def _dispatch_session_command(parsed: ParsedCommand, session_manager) -> None:
+def _dispatch_session_command(
+    parsed: ParsedCommand, session_manager, skills_enabled: bool = False
+) -> None:
     """分发会话管理斜杠命令，负责 IO 编排，不返回值。
 
     参数:
         parsed: 解析后的斜杠命令
         session_manager: 会话管理器，为 None 时提示会话管理未启用
+        skills_enabled: Skill 功能是否启用（skills.enabled），控制 /help
+            中 Skill 命令说明的展示
     """
     if session_manager is None:
         print("会话管理未启用")
@@ -220,8 +226,76 @@ def _dispatch_session_command(parsed: ParsedCommand, session_manager) -> None:
         print("  /search <关键词> 搜索历史消息")
         print("  /session         显示当前会话信息")
         print("  /help            显示此帮助")
+        # Skill 命令说明随 skills.enabled 门控：未启用时不展示
+        if skills_enabled:
+            print("  /skills           列出可用技能与不可用诊断")
+            print("  /skill <名称> [说明]  显式调用技能执行任务")
     else:
         print("未知命令，输入 /help 查看可用命令")
+
+
+def _dispatch_skill_command(parsed: ParsedCommand, skill_manager, skill_loader) -> str | None:
+    """分发 Skill 斜杠命令（/skills 列表、/skill 显式调用）。
+
+    返回值约定（改动最小方案）：
+    - 返回 None 表示本轮命令已处理完毕（列表展示、未启用、用法与未找到等分支），
+      交互循环直接进入下一轮；
+    - /skill 合法命中时不在此处执行引擎，而是返回合成任务文本，由交互循环把
+      user_input 替换为该文本后复用现有"非斜杠输入"执行路径（Span、异常处理、
+      会话保存与 presenter 全部复用），避免复制整段执行循环体。
+
+    参数:
+        parsed: 解析后的斜杠命令
+        skill_manager: Skill 管理器，为 None 时提示 Skill 功能未启用
+        skill_loader: Skill 正文加载器，与 skill_manager 同时构建或同时为 None
+
+    返回:
+        合成任务文本（需转交引擎执行）或 None（本轮已处理完毕）
+    """
+    if skill_manager is None or skill_loader is None:
+        print("Skill 功能未启用")
+        return None
+    if parsed.name == "skills":
+        skills = skill_manager.skills
+        if not skills:
+            print("未发现可用技能")
+        else:
+            print("可用技能:")
+            for skill in skills:
+                print(f"* {skill.qualified_name}  {skill.description}")
+        issues = skill_manager.issues
+        if issues:
+            print("不可用项:")
+            for issue in issues:
+                print(f"- {issue.directory}: {issue.reason}")
+        return None
+    # 剩余分支为 /skill <名称或来源限定名> [补充说明...]
+    if not parsed.args:
+        print("用法: /skill <名称或来源限定名> [补充说明]")
+        return None
+    ref = parsed.args[0]
+    # 缺少任务说明时拒绝执行，避免用占位文本把"无"交给 LLM 处理
+    if len(parsed.args) <= 1:
+        print("请提供任务说明，例如： /skill <名称> <任务>")
+        return None
+    try:
+        skill = skill_manager.resolve(ref)
+    except SkillNotFoundError as exc:
+        # 名称校验失败不进入 LLM 执行；透出异常消息，含同名歧义时的候选列表
+        print(f"错误: {exc}")
+        return None
+    rendered = skill_loader.load(skill.qualified_name)
+    # 加载器错误（如正文超预算）以 "错误:" 开头返回，此时提示后不进入 LLM 执行
+    if rendered.startswith("错误:"):
+        print(rendered)
+        return None
+    instruction = " ".join(parsed.args[1:])
+    print(f"使用技能: {skill.qualified_name}")
+    return (
+        f'请严格按照技能 "{skill.qualified_name}" 的说明执行任务。\n\n'
+        f"{rendered}\n\n"
+        f"用户补充说明:\n{instruction}"
+    )
 
 
 def run() -> int:
@@ -281,6 +355,33 @@ def _run_interactive(config: AppConfig, reader: TerminalInput) -> int:
         registry.register(ReplaceMemoryTool(memory_manager))
         registry.register(RemoveMemoryTool(memory_manager))
 
+    # 构建 Skill 管理器（仅当 skills 启用时）；启动时执行一次发现扫描
+    skill_manager: SkillManager | None = None
+    # 正文加载器与技能管理器同时构建，供 load_skill 工具与 /skill 命令复用
+    skill_loader: SkillLoader | None = None
+    if config.skills.enabled:
+        from ..tools.skill_tool import LoadSkillTool, ReadSkillResourceTool
+
+        skill_manager = SkillManager(config.skills)
+        skill_manager.discover()
+        # 与记忆工具一致：skill 工具按需显式注册，不进入 build_default_registry
+        # 渲染后全文的输出预算与上下文侧单条工具结果截断预算保持一致；
+        # 资源文件读取由 skills.max_resource_tokens 独立控制；
+        # token 计数函数与截断侧完全相同（同 model/method），杜绝口径偏差
+        skill_loader = SkillLoader(
+            skill_manager,
+            max_body_tokens=config.skills.max_body_tokens,
+            max_output_tokens=config.context.max_tool_output_tokens,
+            max_resource_tokens=config.skills.max_resource_tokens,
+            token_counter=count_text_tokens,
+            token_counter_kwargs={
+                "model": config.context.summary_llm.model if config.context.summary_llm is not None else "",
+                "method": config.context.token_counter_method,
+            },
+        )
+        registry.register(LoadSkillTool(skill_loader))
+        registry.register(ReadSkillResourceTool(skill_loader))
+
     # 构建 MCP 工具提供者（仅当 mcp 启用时）；启动会话管理器并注册 MCP 工具
     mcp_session_manager: MCPSessionManager | None = None
     if config.mcp.enabled:
@@ -317,6 +418,12 @@ def _run_interactive(config: AppConfig, reader: TerminalInput) -> int:
     if memory_manager is not None:
         memory_prefix = memory_manager.build_memory_prefix()
 
+    # 会话开始前构建冻结的 Skill 目录前缀：仅含元数据目录与 load_skill 调用约束，
+    # 整个会话复用同一份前缀以命中 prefix cache；未启用或无可用技能时为 None。
+    skill_prefix: str | None = None
+    if skill_manager is not None:
+        skill_prefix = build_skill_catalog_prefix(skill_manager)
+
     tool_names = ", ".join(t.name for t in registry.list_tools())
     print("=" * 60)
     print("SAgent 已启动")
@@ -340,6 +447,15 @@ def _run_interactive(config: AppConfig, reader: TerminalInput) -> int:
         mcp_servers = [s.name for s in config.mcp.servers if s.enabled]
         mcp_tool_count = sum(1 for t in registry.list_tools() if t.name.startswith("mcp_"))
         print(f"MCP: 已启用 | 服务器: {', '.join(mcp_servers) or '无'} | 工具: {mcp_tool_count} 个")
+    if skill_manager is not None:
+        skills = skill_manager.skills
+        issue_count = len(skill_manager.issues)
+        summary = f"可用技能: {len(skills)} 个" if skills else "未发现可用技能"
+        if issue_count:
+            summary += f" | 异常: {issue_count} 条（/skills 查看）"
+        print(f"Skill: 已启用 | {summary}")
+    else:
+        print("Skill: 未启用")
     if permission is not None:
         print(
             f"权限控制: 已启用 | 审批超时: {config.permissions.ask_timeout:g} 秒 | "
@@ -386,8 +502,17 @@ def _run_interactive(config: AppConfig, reader: TerminalInput) -> int:
         # 检查是否为斜杠命令
         parsed = parse_command(user_input)
         if parsed is not None:
-            _dispatch_session_command(parsed, session_manager)
-            continue
+            # /skills、/skill 走 Skill 命令分发；/skill 合法命中时返回合成任务文本，
+            # 替换 user_input 后继续走下方普通执行路径（复用 Span、异常处理与会话保存），
+            # 返回 None 表示命令已处理完，直接进入下一轮
+            if parsed.name in ("skills", "skill"):
+                skill_task = _dispatch_skill_command(parsed, skill_manager, skill_loader)
+                if skill_task is None:
+                    continue
+                user_input = skill_task
+            else:
+                _dispatch_session_command(parsed, session_manager, skills_enabled=config.skills.enabled)
+                continue
 
         # 延迟创建会话：首次真正对话时按需创建，避免启动即产生空会话。
         # 若用户已通过 /new 或 /switch 显式创建/切换会话，则 get_current_session() 返回非 None，不会重复创建。
@@ -411,7 +536,11 @@ def _run_interactive(config: AppConfig, reader: TerminalInput) -> int:
             # 每轮开始前重置 presenter 的流式跟踪，并终结上一轮可能残留的半行输出
             presenter.begin_turn()
             try:
-                answer = engine.run(user_input, memory_prefix=memory_prefix)
+                answer = engine.run(
+                    user_input,
+                    memory_prefix=memory_prefix,
+                    skill_prefix=skill_prefix,
+                )
             except KeyboardInterrupt:
                 # 用户在执行期间中断：终结流式半行，记录状态后继续交互循环
                 span.set_attribute("sagent.outcome", "interrupted")

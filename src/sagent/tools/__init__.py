@@ -6,6 +6,7 @@ from .file_tools import ReadFileTool, WriteFileTool
 from .memory_tool import AddMemoryTool, RemoveMemoryTool, ReplaceMemoryTool
 from .registry import ToolRegistry
 from .shell_tool import ShellTool
+from .skill_tool import LoadSkillTool, ReadSkillResourceTool
 
 
 def build_default_registry(permission: PermissionEnforcer | None = None) -> ToolRegistry:
@@ -32,5 +33,7 @@ __all__ = [
     "AddMemoryTool",
     "ReplaceMemoryTool",
     "RemoveMemoryTool",
+    "LoadSkillTool",
+    "ReadSkillResourceTool",
     "build_default_registry",
 ]

@@ -58,6 +58,8 @@ context:
   # 始终保留的最近消息条数（第四层滑动窗口裁剪使用）
   keep_recent_messages: 20
   # 单条工具结果的最大 token 数，超过则截断（第一层工具输出截断使用）
+  # 该预算作用于渲染后的完整工具结果，包含 load_skill 返回的技能头信息与正文；
+  # 与 skills.max_body_tokens（仅正文）口径不同，两者关系见 skills.max_body_tokens 注释
   max_tool_output_tokens: 2000
   # token 计数方式：auto（自动选择）/ tiktoken（精确）/ heuristic（字符启发式）
   token_counter_method: "auto"
@@ -102,6 +104,38 @@ memory:
   user_max_chars: 2000
   # 记忆文件字符上限，超限时触发 LLM 反思整理
   memory_max_chars: 4000
+
+# Skill 技能配置（可选，缺省时使用默认值）
+# 启用后扫描项目根目录 .sagent/skills 与用户主目录 ~/.sagent/skills 下的技能目录，
+# 每个技能是一个包含 SKILL.md 的子目录（frontmatter 提供 name/description）
+# 供 Agent 按需加载技能正文，渐进式披露，不占固定上下文预算
+skills:
+  # 是否启用 Skill 功能（关闭时不扫描目录、不注入目录、不注册加载工具）
+  enabled: true
+  # 额外 Skill 根目录列表（相对路径相对运行目录解析，支持 ~ 展开用户主目录）
+  # 用于显式接入跨 Agent 共享技能目录，例如填 ".agents/skills" 接入通用 Agent 技能目录
+  # 多个额外目录时按配置顺序生成限定名前缀 extra1、extra2…，用于区分同名技能；
+  # 只有一个额外目录时前缀为 extra
+  # 注意：.agents/skills 不是默认扫描目录，仅在显式配置后接入
+  extra_dirs: []
+  # 示例：
+  # extra_dirs:
+  #   - ".agents/skills"
+  #   - "~/shared-agent-skills"
+  # 技能名白名单（非空时仅保留列表中的技能）
+  allow: []
+  # 技能名黑名单（命中即排除，deny 优先于 allow）
+  deny: []
+  # 单个 Skill 正文最大 token 数（估算），超限拒绝加载并提示拆分，不做静默截断
+  # 注意与 context.max_tool_output_tokens 的关系：本项只约束 SKILL.md 正文，
+  # 而 load_skill 返回的文本还包含技能头、来源、目录与资源目录说明，由
+  # context.max_tool_output_tokens 约束渲染后全文。正文接近但未超过本项上限时，
+  # 渲染后全文仍可能超限，此时加载会被拒绝并提示"渲染后超过输出预算上限"，
+  # 建议保持本项明显小于 context.max_tool_output_tokens（如 2000 对 4000）
+  max_body_tokens: 2000
+  # 单个技能资源文件最大 token 数（估算），超限拒绝读取并提示拆分，不做静默截断
+  # 资源读取经 read_skill_resource 独立入口触发，可单独收紧，不受 context.max_tool_output_tokens 约束
+  max_resource_tokens: 2000
 
 # MCP 工具提供者配置（可选，缺省时默认不启用）
 # 启用后可连接外部 MCP（Model Context Protocol）服务器，扩展 Agent 的工具能力

@@ -4,7 +4,7 @@
 
 ## 项目概述
 
-SAgent 是基于 Python 3.10+ 的 CLI Agent 应用，使用 OpenAI 兼容 API，支持 ReAct 执行循环与自适应计划（Plan）能力、工具调用、MCP 扩展、会话与长期记忆，以及 OpenTelemetry 可观测性。
+SAgent 是基于 Python 3.12+ 的 CLI Agent 应用，使用 OpenAI 兼容 API，支持 ReAct 执行循环与自适应计划（Plan）能力、工具调用、MCP 扩展、会话与长期记忆，以及 OpenTelemetry 可观测性。
 
 ## 核心目录
 

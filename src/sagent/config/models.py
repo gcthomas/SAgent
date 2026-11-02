@@ -133,6 +133,29 @@ class MemoryConfig(BaseModel):
     memory_max_chars: int = Field(default=4000, description="记忆文件字符上限")
 
 
+class SkillConfig(BaseModel):
+    """Skill 功能配置。
+
+    控制 .sagent/skills 技能目录的发现范围、过滤规则、正文预算与资源读取预算。
+    """
+
+    # 是否启用 Skill 功能（关闭时不扫描目录、不注入目录、不注册加载工具）
+    enabled: bool = Field(default=True, description="是否启用 Skill 功能")
+    # 额外 Skill 根目录列表（相对路径相对运行目录解析，支持 ~ 展开用户主目录）
+    # 用于显式接入跨 Agent 共享技能目录（如 .agents/skills）；.agents/skills 不是默认扫描目录
+    extra_dirs: list[str] = Field(default_factory=list, description="额外 Skill 根目录列表")
+    # 技能名白名单（非空时仅保留列表中的技能）
+    allow: list[str] = Field(default_factory=list, description="技能名白名单，非空时仅保留列表中的技能")
+    # 技能名黑名单（命中即排除，deny 优先于 allow）
+    deny: list[str] = Field(default_factory=list, description="技能名黑名单，命中即排除")
+    # 单个 Skill 正文最大 token 数（估算），超限拒绝加载并提示拆分，不做静默截断
+    max_body_tokens: int = Field(default=2000, ge=1, description="单个 Skill 正文最大 token 数（估算）")
+    # 单个技能资源文件最大 token 数（估算），超限拒绝读取并提示拆分，不做静默截断
+    max_resource_tokens: int = Field(
+        default=2000, ge=1, description="单个技能资源文件最大 token 数（估算）"
+    )
+
+
 class ToolFilterConfig(BaseModel):
     """MCP 工具过滤配置。
 
@@ -275,6 +298,7 @@ class AppConfig(BaseModel):
     context: ContextConfig = Field(default_factory=ContextConfig, description="上下文管理配置")
     session: SessionConfig = Field(default_factory=SessionConfig, description="会话管理配置")
     memory: MemoryConfig = Field(default_factory=MemoryConfig, description="长期记忆配置")
+    skills: SkillConfig = Field(default_factory=SkillConfig, description="Skill 配置")
     mcp: MCPConfig = Field(default_factory=MCPConfig, description="MCP 配置")
     observability: ObservabilityConfig = Field(default_factory=ObservabilityConfig, description="可观测性配置")
     permissions: PermissionConfig = Field(default_factory=PermissionConfig, description="权限控制配置")

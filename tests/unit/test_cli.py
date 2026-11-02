@@ -104,7 +104,7 @@ def test_run_interactive_final_output_deduplicates_streaming_and_plan_text(
             # 模拟引擎的本轮实际执行路径，供 app 记录 sagent.mode 使用
             self.last_mode = mode
 
-        def run(self, _task: str, memory_prefix=None) -> str:
+        def run(self, _task: str, memory_prefix=None, skill_prefix=None) -> str:
             if delta is not None:
                 self.on_event(
                     AgentEvent(

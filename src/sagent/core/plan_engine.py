@@ -94,15 +94,24 @@ class PlanEngine:
             event = event.with_plan_context(index=index, total=total, step=step)
         self._emit(event)
 
-    def run(self, task: str, memory_prefix: str | None = None) -> str:
+    def run(
+        self,
+        task: str,
+        memory_prefix: str | None = None,
+        skill_prefix: str | None = None,
+    ) -> str:
         """执行 Plan 模式任务：拆解 -> 分步执行 -> 汇总。
 
         参数:
             task: 用户任务/输入。
             memory_prefix: 可选的记忆注入前缀，叠加到 ReAct 系统提示词之前
                 （而非替换）。会话开始时由调用方冻结构建一次，整个会话复用。
+            skill_prefix: 可选的 Skill 目录前缀，叠加到记忆前缀与 ReAct 系统
+                提示词之间。会话开始时由调用方冻结构建一次，整个会话复用。
         """
         prompt = REACT_SYSTEM_PROMPT
+        if skill_prefix:
+            prompt = skill_prefix + "\n\n" + prompt
         if memory_prefix:
             prompt = memory_prefix + "\n\n" + prompt
         # 恢复状态需在写入用户任务前判定，用于避免重复写入上下文。
@@ -125,7 +134,7 @@ class PlanEngine:
             decompose_span = None
         else:
             with Span("plan.decompose") as decompose_span:
-                step_specs = self._decompose(task)
+                step_specs = self._decompose(task, skill_prefix=skill_prefix)
             step_specs = step_specs[: self._planning_config.max_steps]
             steps = [description for _, description in step_specs]
         if not steps:
@@ -143,6 +152,7 @@ class PlanEngine:
             return self._react.run(
                 task,
                 memory_prefix=memory_prefix,
+                skill_prefix=skill_prefix,
                 persist_task=self._context_manager is None,
             )
 
@@ -237,6 +247,7 @@ class PlanEngine:
                         result = self._react.run(
                             step_task,
                             memory_prefix=memory_prefix,
+                            skill_prefix=skill_prefix,
                             plan_projection=self.plan_state.projection(self._recent_observation),
                             persist_task=True,
                         )
@@ -388,10 +399,19 @@ class PlanEngine:
         if self._on_plan_state_change:
             self._on_plan_state_change(state)
 
-    def _decompose(self, task: str) -> list[tuple[str, str]]:
-        """调用 LLM 将任务拆解为 (title, description) 列表。解析失败返回空列表。"""
+    def _decompose(self, task: str, skill_prefix: str | None = None) -> list[tuple[str, str]]:
+        """调用 LLM 将任务拆解为 (title, description) 列表。解析失败返回空列表。
+
+        参数:
+            task: 用户任务/输入。
+            skill_prefix: 可选的 Skill 目录前缀；非空时叠加到分解阶段 system
+                消息之后，使拆解能感知可用技能目录，为空时保持原有提示词。
+        """
+        system_prompt = PLAN_DECOMPOSE_PROMPT
+        if skill_prefix:
+            system_prompt = system_prompt + "\n\n" + skill_prefix
         messages: list[dict[str, Any]] = [
-            {"role": "system", "content": PLAN_DECOMPOSE_PROMPT},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": task},
         ]
         response = self._chat(messages, emit_stream=False)

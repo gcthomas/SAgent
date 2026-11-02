@@ -41,7 +41,12 @@ class AgentEngine(ReActEngine):
         # 记录本轮实际执行路径（react/plan），供可观测性指标使用
         self.last_mode: str = "react"
 
-    def run(self, task: str, memory_prefix: str | None = None) -> str:
+    def run(
+        self,
+        task: str,
+        memory_prefix: str | None = None,
+        skill_prefix: str | None = None,
+    ) -> str:
         """按配置选择普通 ReAct 或计划子流程。"""
         strategy = self.planning_config.strategy
         self._emit(AgentEvent(event_type="plan_decision", content=f"计划策略: {strategy}"))
@@ -49,19 +54,24 @@ class AgentEngine(ReActEngine):
             self.last_mode = "react"
             if self._session_manager is not None:
                 self._session_manager.set_active_plan(None)
-            return super().run(task, memory_prefix=memory_prefix)
+            return super().run(task, memory_prefix=memory_prefix, skill_prefix=skill_prefix)
         if strategy == "always":
             self.last_mode = "plan"
-            return self._run_plan(task, memory_prefix)
+            return self._run_plan(task, memory_prefix, skill_prefix)
         if self._needs_plan(task):
             self.last_mode = "plan"
-            return self._run_plan(task, memory_prefix)
+            return self._run_plan(task, memory_prefix, skill_prefix)
         self.last_mode = "react"
         if self._session_manager is not None:
             self._session_manager.set_active_plan(None)
-        return super().run(task, memory_prefix=memory_prefix)
+        return super().run(task, memory_prefix=memory_prefix, skill_prefix=skill_prefix)
 
-    def _run_plan(self, task: str, memory_prefix: str | None) -> str:
+    def _run_plan(
+        self,
+        task: str,
+        memory_prefix: str | None,
+        skill_prefix: str | None = None,
+    ) -> str:
         """运行受控计划流程，并清理已完成的活动状态。"""
         try:
             if self._session_manager is not None:
@@ -69,7 +79,9 @@ class AgentEngine(ReActEngine):
                 restored = self._session_manager.get_active_plan()
                 if restored is not None:
                     self._plan.plan_state = restored
-            result = self._plan.run(task, memory_prefix=memory_prefix)
+            result = self._plan.run(
+                task, memory_prefix=memory_prefix, skill_prefix=skill_prefix
+            )
             status = self._plan.plan_state.status if self._plan.plan_state is not None else "completed"
             message = {
                 "completed": "计划执行完成",
