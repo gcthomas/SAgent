@@ -21,7 +21,7 @@ import { buildHistoryMessages } from './history';
 import { ApprovalCard } from './ApprovalCard';
 import { Composer } from './Composer';
 import { PlanCard } from './PlanCard';
-import { StatusBar } from './StatusBar';
+import { RunStatusBar, UsageBar } from './StatusBar';
 import { AssistantMessage, UserMessage } from './ThreadMessages';
 
 // 对话视图属性
@@ -97,15 +97,13 @@ function toRequestError(error: unknown): string {
   return '请求失败';
 }
 
-// 按审批 id 新增或更新审批卡片
+// 按审批 id 新增或更新审批卡片；已结束的审批直接移除，避免卡片堆积
 function upsertApproval(prev: ApprovalData[], next: ApprovalData): ApprovalData[] {
-  const index = prev.findIndex((item) => item.approval_id === next.approval_id);
-  if (index === -1) {
-    return [...prev, next];
+  const withoutItem = prev.filter((item) => item.approval_id !== next.approval_id);
+  if (next.status !== 'pending') {
+    return withoutItem;
   }
-  const merged = prev.slice();
-  merged[index] = next;
-  return merged;
+  return [...withoutItem, next];
 }
 
 export function ChatView({ sessionId }: ChatViewProps) {
@@ -175,13 +173,15 @@ export function ChatView({ sessionId }: ChatViewProps) {
     if (chat.status === 'submitted') {
       setRunStatus(null);
       setPlan(null);
-      setUsage(null);
       setTurnUsage(null);
       setApprovals([]);
       setStopping(false);
       setStopError(null);
     } else if (chat.status === 'ready' || chat.status === 'error') {
       setStopping(false);
+      // 本轮已结束：隐藏运行状态并清理残留的审批卡片
+      setRunStatus(null);
+      setApprovals([]);
     }
   }, [chat.status]);
 
@@ -263,15 +263,11 @@ export function ChatView({ sessionId }: ChatViewProps) {
     })();
   }, [running, runStatus, stopping]);
 
-  // 提交审批决策并更新卡片状态
+  // 提交审批决策并从对话区移除对应卡片
   const handleDecide = useCallback(
     async (approvalId: string, action: ApprovalAction): Promise<void> => {
-      const result = await decideApproval(approvalId, action);
-      setApprovals((prev) =>
-        prev.map((item) =>
-          item.approval_id === approvalId ? { ...item, status: result.status } : item,
-        ),
-      );
+      await decideApproval(approvalId, action);
+      setApprovals((prev) => prev.filter((item) => item.approval_id !== approvalId));
     },
     [],
   );
@@ -287,7 +283,6 @@ export function ChatView({ sessionId }: ChatViewProps) {
 
   return (
     <div className="chat-view">
-      <StatusBar runStatus={runStatus} usage={usage} turnUsage={turnUsage} />
       {historyLoading && <p className="chat-hint">正在加载消息…</p>}
       {historyError && <p className="chat-error">{historyError}</p>}
       <AssistantRuntimeProvider runtime={runtime}>
@@ -319,6 +314,10 @@ export function ChatView({ sessionId }: ChatViewProps) {
             </ThreadPrimitive.Messages>
           </ThreadPrimitive.Viewport>
         </ThreadPrimitive.Root>
+        <div className="chat-status-area">
+          <RunStatusBar runStatus={runStatus} />
+          <UsageBar usage={usage} />
+        </div>
         {(plan !== null || approvals.length > 0 || stopError !== null || chat.error) && (
           <div className="chat-panels">
             {plan !== null && <PlanCard plan={plan} />}

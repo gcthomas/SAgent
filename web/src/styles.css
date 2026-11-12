@@ -395,15 +395,20 @@ button {
   font-size: 12px;
 }
 
-/* 运行状态、计划进度与用量 */
+/* 消息区下方的运行状态与用量：状态随本轮结束隐藏，用量常驻展示 */
+.chat-status-area {
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  padding: 4px 16px 0;
+}
+
 .status-bar {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 10px;
-  padding: 8px 16px;
-  border-bottom: 1px solid var(--border-color);
-  flex-shrink: 0;
+  padding: 2px 0 4px;
   font-size: 12px;
   color: var(--text-secondary);
 }
@@ -465,8 +470,18 @@ button {
   transition: width 0.2s ease;
 }
 
+/* 用量栏单独占一行，避免与状态内容重叠 */
+.usage-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 16px;
+  padding: 2px 0 6px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
 .usage-summary {
-  margin-left: auto;
   white-space: nowrap;
 }
 
@@ -798,11 +813,6 @@ button {
   background: #fffdf5;
 }
 
-.approval-card--decided {
-  border-color: var(--border-color);
-  background: #fafafa;
-}
-
 .approval-card-head {
   display: flex;
   align-items: center;
@@ -864,12 +874,6 @@ button {
   display: flex;
   gap: 8px;
   margin-top: 10px;
-}
-
-.approval-card-done {
-  margin: 8px 0 0;
-  color: var(--text-secondary);
-  font-size: 12px;
 }
 
 /* 面板区与输入区 */

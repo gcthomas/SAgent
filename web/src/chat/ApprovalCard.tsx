@@ -1,6 +1,5 @@
 // 审批卡片：展示待审批工具与参数摘要，并提交批准、拒绝或总是允许
 import { useState } from 'react';
-import classNames from 'classnames';
 import type { ApprovalAction } from '../api/types';
 import { ApiRequestError } from '../api/client';
 import type { ApprovalData } from './dataParts';
@@ -32,7 +31,6 @@ function toApprovalError(error: unknown): string {
 export function ApprovalCard({ approval, onDecide }: ApprovalCardProps) {
   const [submitting, setSubmitting] = useState<ApprovalAction | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const pending = approval.status === 'pending';
   const argsSummary = truncateText(formatJson(approval.arguments), ARGUMENTS_SUMMARY_LENGTH).text;
 
   const handleDecide = async (action: ApprovalAction): Promise<void> => {
@@ -48,7 +46,7 @@ export function ApprovalCard({ approval, onDecide }: ApprovalCardProps) {
   };
 
   return (
-    <section className={classNames('approval-card', !pending && 'approval-card--decided')}>
+    <section className="approval-card">
       <header className="approval-card-head">
         <span className="approval-card-title">工具审批</span>
         <span className="approval-card-status">{APPROVAL_STATUS_LABELS[approval.status]}</span>
@@ -67,36 +65,32 @@ export function ApprovalCard({ approval, onDecide }: ApprovalCardProps) {
       </details>
       {approval.reason && <p className="approval-card-reason">原因：{approval.reason}</p>}
       {error && <p className="chat-error">{error}</p>}
-      {pending ? (
-        <div className="approval-card-actions">
-          <button
-            type="button"
-            className="primary-button"
-            disabled={submitting !== null}
-            onClick={() => void handleDecide('approve')}
-          >
-            批准
-          </button>
-          <button
-            type="button"
-            className="secondary-button"
-            disabled={submitting !== null}
-            onClick={() => void handleDecide('deny')}
-          >
-            拒绝
-          </button>
-          <button
-            type="button"
-            className="secondary-button"
-            disabled={submitting !== null}
-            onClick={() => void handleDecide('always')}
-          >
-            总是允许
-          </button>
-        </div>
-      ) : (
-        <p className="approval-card-done">该审批已处理，仅可查看。</p>
-      )}
+      <div className="approval-card-actions">
+        <button
+          type="button"
+          className="primary-button"
+          disabled={submitting !== null}
+          onClick={() => void handleDecide('approve')}
+        >
+          批准
+        </button>
+        <button
+          type="button"
+          className="secondary-button"
+          disabled={submitting !== null}
+          onClick={() => void handleDecide('deny')}
+        >
+          拒绝
+        </button>
+        <button
+          type="button"
+          className="secondary-button"
+          disabled={submitting !== null}
+          onClick={() => void handleDecide('always')}
+        >
+          总是允许
+        </button>
+      </div>
     </section>
   );
 }
