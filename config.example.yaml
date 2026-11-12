@@ -266,3 +266,19 @@ permissions:
   deny: []
   # 需确认规则列表
   ask: []
+
+# Web 服务配置（可选，缺省时使用默认值）
+# 通过 python -m sagent.server 启动，默认仅监听本机回环地址
+server:
+  # 监听地址
+  host: "127.0.0.1"
+  # 监听端口
+  port: 8000
+  # CORS 允许的来源列表（默认放行本机 Vite 开发服务器）
+  cors_origins:
+    - "http://localhost:5173"
+    - "http://127.0.0.1:5173"
+  # 前端构建产物目录（相对运行目录），未构建时根路径返回未构建提示
+  static_dir: "web/dist"
+  # 是否启用 CORS 中间件
+  enable_cors: true

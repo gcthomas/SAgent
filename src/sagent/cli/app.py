@@ -15,6 +15,7 @@ from ..config.models import AppConfig, PermissionConfig, PlanningConfig
 from ..context.context_manager import ContextManager
 from ..context.token_counter import count_text_tokens
 from ..core.agent_engine import AgentEngine
+from ..core.cancellation import RunCancelled
 from ..llm.client import LLMClient
 from ..memory import MemoryManager, MemoryStore
 from ..observability import Span, close_observability, flush_metrics, get_logger, setup_content_capture, setup_logging, setup_observability
@@ -541,8 +542,8 @@ def _run_interactive(config: AppConfig, reader: TerminalInput) -> int:
                     memory_prefix=memory_prefix,
                     skill_prefix=skill_prefix,
                 )
-            except KeyboardInterrupt:
-                # 用户在执行期间中断：终结流式半行，记录状态后继续交互循环
+            except (KeyboardInterrupt, RunCancelled):
+                # 用户在执行期间中断（或引擎因取消令牌退出）：终结流式半行，记录状态后继续交互循环
                 span.set_attribute("sagent.outcome", "interrupted")
                 span.set_attribute("sagent.mode", engine.last_mode)
                 span.set_status("error")

@@ -47,6 +47,53 @@ python main.py --config config.yaml                # 指定配置文件
 
 进入交互后直接输入问题即可对话，输入 `exit` / `quit` / `:q` 退出。
 
+## Web UI
+
+Web 前端位于 `web/`，提供会话侧栏、对话与轨迹视图。
+
+后端服务与 CLI 一样按源码目录运行，启动前需要把 `src` 加入模块搜索路径（与 `pytest.ini` 的 `pythonpath = src` 一致）。
+
+开发模式（前端热更新，Vite 将 `/api` 代理到 `http://127.0.0.1:8000`）：
+
+```powershell
+# 终端 1：启动后端 API 服务
+$env:PYTHONPATH = "src"
+python -m sagent.server --config config.yaml
+
+# 终端 2：启动前端开发服务器
+cd web
+npm install
+npm run dev
+```
+
+浏览器访问 `http://127.0.0.1:5173`。
+
+生产模式（后端托管前端构建产物）：
+
+```powershell
+# 构建前端产物
+cd web
+npm install
+npm run build
+
+# 回到项目根目录启动后端，由后端托管 web/dist
+cd ..
+$env:PYTHONPATH = "src"
+python -m sagent.server --config config.yaml
+```
+
+构建产物输出到 `web/dist`，后端按配置项 `server.static_dir` 托管，浏览器访问 `http://127.0.0.1:8000`。若静态目录不存在，后端根路径会返回前端未构建的提示，API 仍可正常使用。
+
+`server` 配置段：
+
+| 配置项 | 默认值 | 说明 |
+| --- | --- | --- |
+| `host` | `127.0.0.1` | Web 服务监听地址 |
+| `port` | `8000` | Web 服务监听端口 |
+| `cors_origins` | `["http://localhost:5173", "http://127.0.0.1:5173"]` | CORS 允许的来源列表 |
+| `static_dir` | `web/dist` | 前端构建产物目录（相对运行目录） |
+| `enable_cors` | `true` | 是否启用 CORS 中间件 |
+
 ## 配置
 
 配置采用单一 YAML 文件，完整字段与逐项说明见 [config.example.yaml](config.example.yaml)。主要配置段：

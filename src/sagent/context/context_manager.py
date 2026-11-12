@@ -56,6 +56,13 @@ class ContextManager:
         self._calibrated_tokens: int | None = None
         self._calibrated_count: int = 0
 
+        # 累计用量：无论是否启用 API 校准，只要调用 record_llm_usage 即累加
+        self._usage_totals: dict[str, int] = {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+        }
+
         # 初始化策略实例
         self._truncation = ToolOutputTruncation(
             config.max_tool_output_tokens, summary_model, config.token_counter_method
@@ -105,10 +112,17 @@ class ContextManager:
 
         启用 use_api_calibration 后，每次 LLM 调用返回的 prompt_tokens 作为精确基准，
         后续新增消息仅估算 delta，总量 = 精确基准 + 估算 delta。
+        无论是否启用校准，都会在入口处累计 prompt/completion/total 用量。
 
         参数:
             usage: LLM API 返回的 usage dict，含 prompt_tokens 等字段；None 时跳过
         """
+        if usage is not None:
+            # 入口处累计用量，缺失字段按 0 计入，供 usage_snapshot 读取
+            for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
+                value = usage.get(key)
+                if isinstance(value, int):
+                    self._usage_totals[key] += value
         if not self._config.use_api_calibration or usage is None:
             return
         prompt_tokens = usage.get("prompt_tokens")
@@ -125,6 +139,15 @@ class ContextManager:
                     "total_tokens": usage.get("total_tokens"),
                 },
             )
+
+    def usage_snapshot(self) -> dict[str, int]:
+        """返回当前累计 token 用量的只读快照。
+
+        返回:
+            含 prompt_tokens、completion_tokens、total_tokens 的新 dict，
+            调用方修改返回值不影响内部累计状态
+        """
+        return dict(self._usage_totals)
 
     @property
     def token_count(self) -> int:

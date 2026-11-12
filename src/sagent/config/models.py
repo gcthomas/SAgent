@@ -288,6 +288,28 @@ class PermissionConfig(BaseModel):
         return self
 
 
+class ServerConfig(BaseModel):
+    """Web 服务配置。
+
+    控制 Web 服务监听地址、端口、CORS 允许来源与前端静态资源目录。
+    默认仅监听本机回环地址，默认 CORS 仅允许本机 Vite 开发服务器来源。
+    """
+
+    # 监听地址
+    host: str = Field(default="127.0.0.1", description="Web 服务监听地址")
+    # 监听端口
+    port: int = Field(default=8000, description="Web 服务监听端口")
+    # 允许跨域访问的来源列表（开发模式下默认放行本机 Vite 开发服务器）
+    cors_origins: list[str] = Field(
+        default_factory=lambda: ["http://localhost:5173", "http://127.0.0.1:5173"],
+        description="CORS 允许的来源列表",
+    )
+    # 前端构建产物目录（相对运行目录），由后端托管
+    static_dir: str = Field(default="web/dist", description="前端静态资源目录（相对运行目录）")
+    # 是否启用 CORS 中间件
+    enable_cors: bool = Field(default=True, description="是否启用 CORS 中间件")
+
+
 class AppConfig(BaseModel):
     """应用总配置。"""
 
@@ -302,3 +324,4 @@ class AppConfig(BaseModel):
     mcp: MCPConfig = Field(default_factory=MCPConfig, description="MCP 配置")
     observability: ObservabilityConfig = Field(default_factory=ObservabilityConfig, description="可观测性配置")
     permissions: PermissionConfig = Field(default_factory=PermissionConfig, description="权限控制配置")
+    server: ServerConfig = Field(default_factory=ServerConfig, description="Web 服务配置")

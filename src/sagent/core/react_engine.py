@@ -12,6 +12,7 @@ from typing import Any
 from ..config.models import AgentConfig
 from ..context.context_manager import ContextManager
 from ..llm.client import LLMClient, LLMStreamEvent
+from .cancellation import CancelToken
 from .events import AgentEvent, EventHandler
 from ..observability import Span, get_logger
 from ..tools.registry import ToolRegistry
@@ -30,6 +31,7 @@ class ReActEngine:
         agent_config: AgentConfig,
         on_event: EventHandler | None = None,
         context_manager: ContextManager | None = None,
+        cancel_token: CancelToken | None = None,
     ) -> None:
         """初始化引擎。
 
@@ -39,13 +41,20 @@ class ReActEngine:
             agent_config: Agent 配置（含最大迭代次数）。
             on_event: 可选的过程回调，用于向 CLI 输出中间过程（思考/工具调用/观察）。
             context_manager: 可选的上下文管理器，注入后实现跨轮次上下文持久化。
+            cancel_token: 可选的协作式取消令牌；为 None 时行为与原有实现一致。
         """
         self.llm = llm
         self.registry = registry
         self.config = agent_config
         self._on_event = on_event
         self._context_manager = context_manager
+        self._cancel_token = cancel_token
         self._outcome = "completed"
+
+    def _raise_if_cancelled(self) -> None:
+        """令牌存在且已取消时抛出 RunCancelled。"""
+        if self._cancel_token is not None:
+            self._cancel_token.raise_if_cancelled()
 
     def _emit(self, event: AgentEvent) -> None:
         """输出结构化过程事件。"""
@@ -61,6 +70,8 @@ class ReActEngine:
                 AgentEvent(
                     event_type="llm_completed",
                     content=event.response.content if event.response else None,
+                    usage=event.response.usage if event.response else None,
+                    latency_ms=event.latency_ms,
                 )
             )
 
@@ -131,6 +142,8 @@ class ReActEngine:
 
             empty_retries = 0
             for iteration in range(1, self.config.max_iterations + 1):
+                # 每轮迭代开始前检查取消，已取消时不再发起 LLM 请求
+                self._raise_if_cancelled()
                 span.add_event("iteration", {"index": iteration})
                 logger.debug(
                     "ReAct 迭代",
@@ -170,6 +183,8 @@ class ReActEngine:
 
                 # 依次执行工具调用并追加观察结果
                 for call in response.tool_calls:
+                    # 工具调用前检查取消，已取消时不执行该工具
+                    self._raise_if_cancelled()
                     self._emit(
                         AgentEvent(
                             event_type="tool_call",
@@ -255,6 +270,8 @@ class ReActEngine:
 
             empty_retries = 0
             for iteration in range(1, self.config.max_iterations + 1):
+                # 每轮迭代开始前检查取消，已取消时不再发起 LLM 请求
+                self._raise_if_cancelled()
                 span.add_event("iteration", {"index": iteration})
                 logger.debug(
                     "ReAct 迭代（上下文模式）",
@@ -302,6 +319,8 @@ class ReActEngine:
 
                 # 依次执行工具调用并追加观察结果到上下文
                 for call in response.tool_calls:
+                    # 工具调用前检查取消，已取消时不执行该工具
+                    self._raise_if_cancelled()
                     self._emit(
                         AgentEvent(
                             event_type="tool_call",

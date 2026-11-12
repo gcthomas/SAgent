@@ -9,6 +9,7 @@ from ..config.models import AgentConfig, PlanningConfig
 from ..context.context_manager import ContextManager
 from ..llm.client import LLMClient
 from ..tools.registry import ToolRegistry
+from .cancellation import CancelToken
 from .events import AgentEvent, EventHandler
 from .plan_engine import PlanEngine
 from .prompts import PLAN_DECISION_PROMPT
@@ -26,8 +27,9 @@ class AgentEngine(ReActEngine):
         planning_config: PlanningConfig | None = None,
         on_event: EventHandler | None = None,
         context_manager: ContextManager | None = None,
+        cancel_token: CancelToken | None = None,
     ) -> None:
-        super().__init__(llm, registry, agent_config, on_event, context_manager)
+        super().__init__(llm, registry, agent_config, on_event, context_manager, cancel_token)
         self.planning_config = planning_config or PlanningConfig()
         self._plan = PlanEngine(
             llm,
@@ -36,10 +38,19 @@ class AgentEngine(ReActEngine):
             on_event=on_event,
             context_manager=context_manager,
             planning_config=self.planning_config,
+            cancel_token=cancel_token,
         )
         self._session_manager = None
         # 记录本轮实际执行路径（react/plan），供可观测性指标使用
         self.last_mode: str = "react"
+
+    def set_session_manager(self, session_manager) -> None:
+        """注入会话管理器，供计划模式把活动计划写回会话。
+
+        参数:
+            session_manager: 会话管理器实例；None 表示不回写。
+        """
+        self._session_manager = session_manager
 
     def run(
         self,

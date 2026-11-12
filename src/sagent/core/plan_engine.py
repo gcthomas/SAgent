@@ -10,6 +10,7 @@ import re
 from typing import Any
 
 from ..config.models import AgentConfig, PlanningConfig
+from .cancellation import CancelToken, RunCancelled
 from .plan_state import PlanState, PlanStepState
 from ..context.context_manager import ContextManager
 from ..llm.client import LLMClient, LLMStreamEvent
@@ -33,6 +34,7 @@ class PlanEngine:
         on_event: EventHandler | None = None,
         context_manager: ContextManager | None = None,
         planning_config: PlanningConfig | None = None,
+        cancel_token: CancelToken | None = None,
     ) -> None:
         self.llm = llm
         self.registry = registry
@@ -40,6 +42,7 @@ class PlanEngine:
         self._on_event = on_event
         self._context_manager = context_manager
         self._planning_config = planning_config or PlanningConfig()
+        self._cancel_token = cancel_token
         self.plan_state: PlanState | None = None
         self._outcome = "completed"
         self._step_context: tuple[int, int, str] | None = None
@@ -52,7 +55,13 @@ class PlanEngine:
             agent_config,
             self._forward_react_event,
             context_manager=context_manager,
+            cancel_token=cancel_token,
         )
+
+    def _raise_if_cancelled(self) -> None:
+        """令牌存在且已取消时抛出 RunCancelled。"""
+        if self._cancel_token is not None:
+            self._cancel_token.raise_if_cancelled()
 
     def _emit(self, event: AgentEvent) -> None:
         if self._on_event:
@@ -68,6 +77,8 @@ class PlanEngine:
                     event_type="llm_completed",
                     content=event.response.content if event.response else None,
                     mode="plan",
+                    usage=event.response.usage if event.response else None,
+                    latency_ms=event.latency_ms,
                 )
             )
 
@@ -88,6 +99,11 @@ class PlanEngine:
                 tool_name=event.tool_name,
                 tool_arguments=event.tool_arguments,
                 tool_call_id=event.tool_call_id,
+                status=event.status,
+                approval_id=event.approval_id,
+                approval_action=event.approval_action,
+                usage=event.usage,
+                latency_ms=event.latency_ms,
             )
         else:
             index, total, step = self._step_context
@@ -211,6 +227,8 @@ class PlanEngine:
             if self.plan_state.steps[idx - 1].status == "completed":
                 idx += 1
                 continue
+            # 步骤边界检查取消，已取消时不再进入下一步
+            self._raise_if_cancelled()
             with Span("plan.step") as step_span:
                 step_span.set_attribute("sagent.step_index", idx)
                 step_span.set_attribute("sagent.step_total", len(steps))
@@ -251,6 +269,9 @@ class PlanEngine:
                             plan_projection=self.plan_state.projection(self._recent_observation),
                             persist_task=True,
                         )
+                    except RunCancelled:
+                        # 取消必须向上传播，不得被重规划逻辑吞成普通结果
+                        raise
                     except Exception as exc:
                         # 异常与错误结果共享计划级重规划上限，耗尽后标记 blocked。
                         if self.plan_state.replans < self._planning_config.max_replans:
@@ -298,6 +319,15 @@ class PlanEngine:
                     step_results.append(f"步骤 {idx}（{step}）结果:\n{result}")
                     if self._on_plan_state_change:
                         self._on_plan_state_change(self.plan_state)
+                    self._emit(
+                        AgentEvent(
+                            event_type="plan_step_completed",
+                            mode="plan",
+                            plan_step_index=idx,
+                            plan_step_total=len(self.plan_state.steps),
+                            plan_step=step,
+                        )
+                    )
                     break
                 # 受阻后停止后续步骤，进入部分结果收尾。
                 if self.plan_state.status == "blocked":
@@ -340,6 +370,8 @@ class PlanEngine:
         return summary
 
     def _replan(self, task: str, failed_index: int, observation: str) -> None:
+        # 重规划前检查取消，已取消时不再发起新的规划请求
+        self._raise_if_cancelled()
         state = self.plan_state
         completed = [step for step in state.steps if step.status == "completed"]
         remaining = [

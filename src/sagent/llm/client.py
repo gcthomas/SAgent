@@ -51,6 +51,7 @@ class LLMStreamEvent:
     tool_name: str | None = None
     tool_arguments: str | None = None
     response: LLMResponse | None = None
+    latency_ms: float | None = None
 
 
 StreamCallback = Callable[[LLMStreamEvent], None]
@@ -157,7 +158,10 @@ class LLMClient:
             latency_ms = round((time.perf_counter() - start) * 1000, 1)
             self._log_response(response, response.usage, latency_ms, usage_obj)
             self._set_response_span(span, response, latency_ms, usage_obj)
-            self._emit(on_event, LLMStreamEvent("completed", response=response))
+            self._emit(
+                on_event,
+                LLMStreamEvent("completed", response=response, latency_ms=latency_ms),
+            )
             return response
 
     def _chat_non_streaming(

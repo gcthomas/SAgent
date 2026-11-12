@@ -69,3 +69,46 @@ class CompactionEvent(BaseModel):
     covered_to_seq: int = Field(..., description="被摘要覆盖的结束 seq")
     # 事件创建时间（ISO 格式字符串）
     created_at: str = Field(..., description="事件创建时间（ISO 格式字符串）")
+
+
+class TurnRecord(BaseModel):
+    """轮次统计记录。
+
+    记录单轮交互的起止时间、耗时与 token 用量等派生统计，
+    供对话视图与轨迹视图展示；不承载消息事实内容。
+    """
+
+    # 会话唯一标识
+    session_id: str = Field(..., description="会话唯一标识")
+    # 轮次序号（会话内从 1 开始递增）
+    turn_index: int = Field(..., description="轮次序号（会话内从 1 开始递增）")
+    # 本轮开始时间（ISO 格式字符串）
+    started_at: str = Field(..., description="本轮开始时间（ISO 格式字符串）")
+    # 本轮结束时间（ISO 格式字符串）
+    finished_at: str = Field(..., description="本轮结束时间（ISO 格式字符串）")
+    # 本轮耗时（毫秒）
+    duration_ms: int = Field(..., description="本轮耗时（毫秒）")
+    # prompt token 用量
+    prompt_tokens: int = Field(default=0, description="prompt token 用量")
+    # completion token 用量
+    completion_tokens: int = Field(default=0, description="completion token 用量")
+    # 总 token 用量
+    total_tokens: int = Field(default=0, description="总 token 用量")
+    # 本轮结果状态（completed/failed/cancelled）
+    outcome: str = Field(..., description="本轮结果状态（completed/failed/cancelled）")
+    # 执行模式（react/plan）
+    mode: str = Field(..., description="执行模式（react/plan）")
+
+
+class SessionSearchHit(BaseModel):
+    """会话搜索结果。
+
+    记录命中的会话元数据、命中来源（标题/内容/两者）与摘要片段。
+    """
+
+    # 命中的会话元数据
+    session: SessionMeta = Field(..., description="命中的会话元数据")
+    # 命中来源（title/content/both）
+    match_source: str = Field(..., description="命中来源（title/content/both）")
+    # 命中摘要片段，无摘要时为 None
+    snippet: str | None = Field(default=None, description="命中摘要片段")
