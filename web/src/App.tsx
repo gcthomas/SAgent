@@ -279,12 +279,20 @@ export default function App() {
             轨迹
           </button>
         </nav>
-        <section className={classNames('tab-content', activeTab === 'chat' && 'tab-content--chat')}>
-          {activeTab === 'chat' ? (
+        <section className="tab-content">
+          {/* 两个视图常驻挂载，仅切换显隐：避免切 tab 重复请求与中断对话流 */}
+          <div
+            className={classNames(
+              'tab-pane',
+              'tab-pane--chat',
+              activeTab !== 'chat' && 'tab-pane--hidden',
+            )}
+          >
             <ChatView sessionId={selectedId} />
-          ) : (
-            <TraceView sessionId={selectedId} />
-          )}
+          </div>
+          <div className={classNames('tab-pane', activeTab !== 'trace' && 'tab-pane--hidden')}>
+            <TraceView sessionId={selectedId} active={activeTab === 'trace'} />
+          </div>
         </section>
       </main>
     </div>

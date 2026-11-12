@@ -6,6 +6,8 @@ import type { TraceResponse, TraceToolCall, TraceTurn } from '../api/types';
 // 轨迹视图属性
 interface TraceViewProps {
   sessionId: string | null;
+  // 轨迹 tab 当前是否可见：从隐藏切回可见时重新拉取，保证展示最新轮次
+  active: boolean;
 }
 
 // 复制状态
@@ -166,7 +168,7 @@ function TraceTurnBlock({ turn, defaultOpen }: { turn: TraceTurn; defaultOpen: b
   );
 }
 
-export function TraceView({ sessionId }: TraceViewProps) {
+export function TraceView({ sessionId, active }: TraceViewProps) {
   const [trace, setTrace] = useState<TraceResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -184,13 +186,17 @@ export function TraceView({ sessionId }: TraceViewProps) {
     };
   }, []);
 
-  // 会话切换或重新加载时重新拉取轨迹，用 cancelled 标记避免竞态与卸载后写入状态
+  // 会话切换、重新加载或从隐藏切回可见时拉取轨迹，用 cancelled 标记避免竞态与卸载后写入状态
   useEffect(() => {
     if (sessionId === null) {
       setTrace(null);
       setLoading(false);
       setError(null);
       setNotFound(false);
+      return;
+    }
+    // 隐藏状态下不请求，等切回轨迹 tab 时再刷新
+    if (!active) {
       return;
     }
     let cancelled = false;
@@ -221,7 +227,7 @@ export function TraceView({ sessionId }: TraceViewProps) {
     return () => {
       cancelled = true;
     };
-  }, [sessionId, reloadToken]);
+  }, [sessionId, reloadToken, active]);
 
   // 重新加载轨迹
   const handleReload = useCallback(() => {

@@ -328,7 +328,26 @@ button {
 .tab-content {
   flex: 1;
   min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* 常驻挂载的 tab 面板：非活动面板隐藏但保留组件状态 */
+.tab-pane {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
   overflow: auto;
+}
+
+.tab-pane--chat {
+  overflow: hidden;
+}
+
+.tab-pane--hidden {
+  display: none;
 }
 
 .placeholder {
@@ -353,12 +372,6 @@ button {
 }
 
 /* 对话视图：状态栏 + 消息区 + 面板区 + 输入区 */
-.tab-content--chat {
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-}
-
 .chat-view {
   display: flex;
   flex: 1;
