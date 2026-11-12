@@ -27,6 +27,7 @@ from ..schemas import (
     SessionRenameRequest,
     SessionSearchItem,
     SessionSearchResponse,
+    UsageInfo,
 )
 
 logger = get_logger(__name__)
@@ -250,7 +251,7 @@ def list_messages(session_id: str, request: Request) -> MessageListResponse:
         request: 当前请求。
 
     返回:
-        按 seq 升序排列的消息列表。
+        按 seq 升序排列的消息列表，以及会话累计 token 用量。
     """
     store = require_store(request)
     if store.get_session(session_id) is None:
@@ -277,4 +278,15 @@ def list_messages(session_id: str, request: Request) -> MessageListResponse:
         )
         for row in rows
     ]
-    return MessageListResponse(messages=messages)
+    # 会话累计用量来自 turns 表，供前端在历史会话中展示用量栏
+    totals = store.sum_turn_tokens(session_id)
+    usage = (
+        UsageInfo(
+            prompt_tokens=totals[0],
+            completion_tokens=totals[1],
+            total_tokens=totals[2],
+        )
+        if totals is not None
+        else None
+    )
+    return MessageListResponse(messages=messages, usage=usage)

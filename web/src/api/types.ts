@@ -47,6 +47,8 @@ export interface SessionMessage {
 // 会话消息列表响应
 export interface SessionMessagesResponse {
   messages: SessionMessage[];
+  // 会话累计 token 用量（全部轮次合计），无轮次记录时为 null
+  usage: TraceUsage | null;
 }
 
 // 轨迹中的 token 用量

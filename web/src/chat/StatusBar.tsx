@@ -1,5 +1,5 @@
 // 对话区的运行状态与用量展示：状态随本轮结束隐藏，用量常驻展示
-import type { RunStatusData, UsageData } from './dataParts';
+import type { RunStatusData } from './dataParts';
 import { RUN_STATUS_LABELS } from './dataParts';
 
 // 运行状态栏属性
@@ -9,7 +9,8 @@ interface RunStatusBarProps {
 
 // 用量栏属性
 interface UsageBarProps {
-  usage: UsageData | null;
+  // 会话累计 token 用量；null 表示历史与本轮都没有可用记录
+  tokens: number | null;
 }
 
 // 本轮已结束的终态：状态条不再展示
@@ -59,12 +60,10 @@ export function RunStatusBar({ runStatus }: RunStatusBarProps) {
 }
 
 // 用量栏：常驻展示会话累计 token 用量，与运行状态分行
-export function UsageBar({ usage }: UsageBarProps) {
+export function UsageBar({ tokens }: UsageBarProps) {
   return (
     <div className="usage-bar">
-      <span className="usage-summary">
-        会话累计 Token：{usage ? usage.run_total.total_tokens : '未记录'}
-      </span>
+      <span className="usage-summary">会话累计 Token：{tokens === null ? '未记录' : tokens}</span>
     </div>
   );
 }

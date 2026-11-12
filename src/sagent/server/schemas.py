@@ -95,18 +95,22 @@ class MessageItem(BaseModel):
     created_at: str = Field(..., description="写入时间（ISO 格式字符串）")
 
 
-class MessageListResponse(BaseModel):
-    """会话历史消息响应。"""
-
-    messages: list[MessageItem] = Field(..., description="按 seq 升序排列的消息列表")
-
-
 class UsageInfo(BaseModel):
     """token 用量。"""
 
     prompt_tokens: int = Field(..., description="prompt token 用量")
     completion_tokens: int = Field(..., description="completion token 用量")
     total_tokens: int = Field(..., description="总 token 用量")
+
+
+class MessageListResponse(BaseModel):
+    """会话历史消息响应。"""
+
+    messages: list[MessageItem] = Field(..., description="按 seq 升序排列的消息列表")
+    usage: UsageInfo | None = Field(
+        default=None,
+        description="会话累计 token 用量（全部轮次合计），无轮次记录时为 None",
+    )
 
 
 class TraceUserMessage(BaseModel):

@@ -878,6 +878,38 @@ class SessionStore:
             cur.close()
         return int(row["n"]) if row is not None else 0
 
+    def sum_turn_tokens(self, session_id: str) -> tuple[int, int, int] | None:
+        """返回会话全部轮次的 token 用量合计。
+
+        参数:
+            session_id: 会话唯一标识
+
+        返回:
+            (prompt_tokens, completion_tokens, total_tokens) 三元组；
+            会话没有任何轮次记录时返回 None
+        """
+        with self._lock:
+            cur = self._conn.execute(
+                """
+                SELECT COUNT(*) AS n,
+                       COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens,
+                       COALESCE(SUM(completion_tokens), 0) AS completion_tokens,
+                       COALESCE(SUM(total_tokens), 0) AS total_tokens
+                FROM turns
+                WHERE session_id = ?
+                """,
+                (session_id,),
+            )
+            row = cur.fetchone()
+            cur.close()
+        if row is None or int(row["n"]) == 0:
+            return None
+        return (
+            int(row["prompt_tokens"]),
+            int(row["completion_tokens"]),
+            int(row["total_tokens"]),
+        )
+
     def query_rows(self, sql: str, params: tuple[Any, ...]) -> list[dict[str, Any]]:
         """在内部连接上执行只读查询并返回行字典列表。
 

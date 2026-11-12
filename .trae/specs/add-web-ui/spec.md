@@ -262,6 +262,7 @@ SAgent 当前只能通过 CLI 交互，会话管理、运行状态、计划进�
 - 每轮结束写入一条 `TurnRecord`：`session_id`、`turn_index`、`started_at`、`finished_at`、`duration_ms`、`prompt_tokens`、`completion_tokens`、`total_tokens`、`outcome`、`mode`。
 - 用量取该轮 `ContextManager` 累计 usage 的差值，避免跨轮重复计数。
 - 会话级累计用量为全部轮次之和；缺失轮次记录时前端显示"未记录"，不虚构数值。
+- 历史消息接口（`GET /api/sessions/{id}/messages`）同时返回会话累计用量；前端以历史累计加本轮实时累计展示，本轮结束后把实时用量折叠进历史累计，避免显示回退为"未记录"或重复计数。
 
 #### Scenario: 单轮用量
 

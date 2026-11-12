@@ -5,7 +5,7 @@ import type { DataUIPart } from 'ai';
 import { useChat } from '@ai-sdk/react';
 import { AssistantRuntimeProvider, ThreadPrimitive } from '@assistant-ui/react';
 import { useAISDKRuntime } from '@assistant-ui/react-ai-sdk';
-import type { ApprovalAction } from '../api/types';
+import type { ApprovalAction, TraceUsage } from '../api/types';
 import { cancelRun, decideApproval, listMessages } from '../api/client';
 import { ApiRequestError } from '../api/client';
 import type {
@@ -111,6 +111,10 @@ export function ChatView({ sessionId }: ChatViewProps) {
   const [runStatus, setRunStatus] = useState<RunStatusData | null>(null);
   const [plan, setPlan] = useState<PlanData | null>(null);
   const [usage, setUsage] = useState<UsageData | null>(null);
+  // 历史会话累计用量（来自消息接口），本轮结束后把实时用量折叠进来
+  const [persistedUsage, setPersistedUsage] = useState<TraceUsage | null>(null);
+  // 保存最新的本轮实时用量，供本轮结束时折叠进历史累计
+  const usageRef = useRef<UsageData | null>(null);
   // 本轮耗时与 token 用量，在助手消息下方展示
   const [turnUsage, setTurnUsage] = useState<TurnUsageData | null>(null);
   const [approvals, setApprovals] = useState<ApprovalData[]>([]);
@@ -145,6 +149,7 @@ export function ChatView({ sessionId }: ChatViewProps) {
         setPlan(part.data);
         break;
       case 'data-usage':
+        usageRef.current = part.data;
         setUsage(part.data);
         break;
       case 'data-turn-usage':
@@ -173,6 +178,9 @@ export function ChatView({ sessionId }: ChatViewProps) {
     if (chat.status === 'submitted') {
       setRunStatus(null);
       setPlan(null);
+      // 新一轮 run 的累计用量从零开始，清空上一轮残留的实时用量
+      usageRef.current = null;
+      setUsage(null);
       setTurnUsage(null);
       setApprovals([]);
       setStopping(false);
@@ -182,6 +190,17 @@ export function ChatView({ sessionId }: ChatViewProps) {
       // 本轮已结束：隐藏运行状态并清理残留的审批卡片
       setRunStatus(null);
       setApprovals([]);
+      // 把本轮实时用量折叠进会话累计，避免用量栏回退为未记录或重复计数
+      const live = usageRef.current;
+      if (live !== null) {
+        usageRef.current = null;
+        setPersistedUsage((prev) => ({
+          prompt_tokens: (prev?.prompt_tokens ?? 0) + live.run_total.prompt_tokens,
+          completion_tokens: (prev?.completion_tokens ?? 0) + live.run_total.completion_tokens,
+          total_tokens: (prev?.total_tokens ?? 0) + live.run_total.total_tokens,
+        }));
+        setUsage(null);
+      }
     }
   }, [chat.status]);
 
@@ -193,6 +212,8 @@ export function ChatView({ sessionId }: ChatViewProps) {
         const data = await listMessages(targetId);
         if (!isCancelled()) {
           chat.setMessages(buildHistoryMessages(data.messages));
+          // 历史累计用量以消息接口返回的轮次合计为准
+          setPersistedUsage(data.usage ?? null);
         }
       } catch (error) {
         if (!isCancelled()) {
@@ -214,6 +235,8 @@ export function ChatView({ sessionId }: ChatViewProps) {
     setRunStatus(null);
     setPlan(null);
     setUsage(null);
+    usageRef.current = null;
+    setPersistedUsage(null);
     setTurnUsage(null);
     setApprovals([]);
     setStopping(false);
@@ -272,6 +295,12 @@ export function ChatView({ sessionId }: ChatViewProps) {
     [],
   );
 
+  // 会话累计 token：历史累计 + 本轮实时累计；两者都未知时展示未记录
+  const sessionTokens =
+    persistedUsage === null && usage === null
+      ? null
+      : (persistedUsage?.total_tokens ?? 0) + (usage?.run_total.total_tokens ?? 0);
+
   if (sessionId === null) {
     return (
       <div className="placeholder">
@@ -316,7 +345,7 @@ export function ChatView({ sessionId }: ChatViewProps) {
         </ThreadPrimitive.Root>
         <div className="chat-status-area">
           <RunStatusBar runStatus={runStatus} />
-          <UsageBar usage={usage} />
+          <UsageBar tokens={sessionTokens} />
         </div>
         {(plan !== null || approvals.length > 0 || stopError !== null || chat.error) && (
           <div className="chat-panels">

@@ -53,6 +53,7 @@
 - [x] 会话列表按更新时间降序，字段含 id、title、updated_at、message_count
 - [x] 创建、重命名、删除接口返回结构符合 spec
 - [x] `GET /api/sessions/{id}/trace` 返回系统初始提示词、轮次列表与总用量
+- [x] `GET /api/sessions/{id}/messages` 返回会话累计用量，无轮次记录时为 null
 - [x] 历史无 `system` 消息时回退为当前引擎默认提示词
 - [x] 轮次按真实用户输入切分（计划步骤指令不计为单独轮次），工具调用与结果按 `tool_call_id` 关联
 - [x] 压缩事件在轨迹对应位置显示被覆盖的 seq 区间

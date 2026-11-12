@@ -296,7 +296,8 @@ def test_list_messages_returns_full_rows(client):
 
     response = client.get(f"/api/sessions/{session_id}/messages")
     assert response.status_code == 200
-    messages = response.json()["messages"]
+    body = response.json()
+    messages = body["messages"]
     assert len(messages) == 9
     assert [message["seq"] for message in messages] == list(range(1, 10))
     assert messages[0]["role"] == "system"
@@ -313,6 +314,29 @@ def test_list_messages_returns_full_rows(client):
     tool_message = messages[3]
     assert tool_message["role"] == "tool"
     assert tool_message["tool_call_id"] == "call_1"
+
+    # 会话累计用量取自 turns 表，供前端用量栏在历史会话中展示
+    assert body["usage"] == {
+        "prompt_tokens": 10,
+        "completion_tokens": 5,
+        "total_tokens": 15,
+    }
+
+
+def test_list_messages_without_turns_returns_no_usage(client):
+    store = client.app.state.store
+    _insert_session(store, "noTurn01", "无轮次会话")
+    store.append_messages(
+        "noTurn01",
+        [SessionMessage(role="user", content="你好", seq=1)],
+        "2026-01-06T12:00:00",
+    )
+
+    response = client.get("/api/sessions/noTurn01/messages")
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body["messages"]) == 1
+    assert body["usage"] is None
 
 
 def test_list_messages_missing_session_returns_404(client):
