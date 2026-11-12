@@ -22,6 +22,9 @@ from .react_engine import ReActEngine
 
 logger = get_logger(__name__)
 
+# 计划步骤指令作为 user 消息持久化时的前缀；轨迹切分据此识别引擎内部指令
+PLAN_STEP_TASK_PREFIX = "当前需要完成的步骤: "
+
 
 class PlanEngine:
     """Plan 执行引擎。"""
@@ -254,7 +257,7 @@ class PlanEngine:
                     # 原始任务已在共享上下文中持久化，且计划投影也携带，故步骤指令
                     # 只保留当前步骤，避免重复占用上下文预算。
                     step_task = (
-                        f"当前需要完成的步骤: {step}\n"
+                        f"{PLAN_STEP_TASK_PREFIX}{step}\n"
                         f"请完成该步骤并给出结果。"
                     )
                     self._step_context = (idx, len(steps), step)

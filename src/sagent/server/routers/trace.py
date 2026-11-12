@@ -1,6 +1,6 @@
 """会话轨迹查询路由。
 
-按第一条 user 消息切分交互轮次，聚合助手文本、工具调用结果与压缩事件，
+按真实用户消息切分交互轮次（跳过计划步骤指令），聚合助手文本、工具调用结果与压缩事件，
 并补充持久化的轮次用量统计与系统提示词来源。
 """
 
@@ -11,6 +11,7 @@ from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Request
 
+from ...core.plan_engine import PLAN_STEP_TASK_PREFIX
 from ...core.prompts import REACT_SYSTEM_PROMPT
 from ...memory import MemoryManager
 from ...observability import get_logger
@@ -118,7 +119,10 @@ def _build_tool_calls(
 
 
 def _split_turns(messages: list[SessionMessage]) -> list[dict[str, Any]]:
-    """按 user 消息切分轮次并归集助手文本、工具调用与结果。
+    """按真实用户消息切分轮次并归集助手文本、工具调用与结果。
+
+    计划步骤指令以 user 消息形式持久化，属于当前轮次的内部执行上下文，
+    不作为新的交互轮次起点。
 
     参数:
         messages: 按 seq 升序排列的完整历史消息。
@@ -131,6 +135,8 @@ def _split_turns(messages: list[SessionMessage]) -> list[dict[str, Any]]:
     current: dict[str, Any] | None = None
     for message in messages:
         if message.role == "user":
+            if current is not None and (message.content or "").startswith(PLAN_STEP_TASK_PREFIX):
+                continue
             current = {
                 "user": message,
                 "assistant_texts": [],

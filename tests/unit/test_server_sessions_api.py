@@ -12,6 +12,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from sagent.config.models import AppConfig
+from sagent.core.plan_engine import PLAN_STEP_TASK_PREFIX
 from sagent.core.prompts import REACT_SYSTEM_PROMPT
 from sagent.server.app import create_app
 from sagent.session.models import (
@@ -406,6 +407,60 @@ def test_trace_builds_turns_usage_and_compactions(client):
             "created_at": "2026-01-05T12:00:05",
         }
     ]
+
+
+def test_trace_ignores_plan_step_instructions(client):
+    store = client.app.state.store
+    session_id = "trace002"
+    _insert_session(store, session_id, "计划轨迹会话")
+    store.append_messages(
+        session_id,
+        [
+            SessionMessage(role="user", content="生成今日日报", seq=1),
+            SessionMessage(
+                role="user",
+                content=f"{PLAN_STEP_TASK_PREFIX}查询资讯\n请完成该步骤并给出结果。",
+                seq=2,
+            ),
+            SessionMessage(role="assistant", content="查询结果", seq=3),
+            SessionMessage(
+                role="user",
+                content=f"{PLAN_STEP_TASK_PREFIX}汇总输出\n请完成该步骤并给出结果。",
+                seq=4,
+            ),
+            SessionMessage(role="assistant", content="最终日报", seq=5),
+        ],
+        "2026-01-07T00:00:00",
+    )
+    store.append_turn(
+        TurnRecord(
+            session_id=session_id,
+            turn_index=1,
+            started_at="2026-01-07T00:00:01",
+            finished_at="2026-01-07T00:00:09",
+            duration_ms=8000,
+            prompt_tokens=20,
+            completion_tokens=10,
+            total_tokens=30,
+            outcome="completed",
+            mode="plan",
+        )
+    )
+
+    response = client.get(f"/api/sessions/{session_id}/trace")
+    assert response.status_code == 200
+    body = response.json()
+    # 计划步骤指令不产生额外的交互轮次
+    assert body["total_turns"] == 1
+    turn = body["turns"][0]
+    assert turn["user"]["content"] == "生成今日日报"
+    assert turn["mode"] == "plan"
+    assert turn["usage"] == {
+        "prompt_tokens": 20,
+        "completion_tokens": 10,
+        "total_tokens": 30,
+    }
+    assert turn["assistant_text"] == "查询结果\n\n最终日报"
 
 
 def test_trace_uses_default_system_prompt_when_not_stored(client):
