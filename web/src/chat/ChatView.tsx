@@ -198,6 +198,7 @@ export function ChatView({ sessionId }: ChatViewProps) {
           prompt_tokens: (prev?.prompt_tokens ?? 0) + live.run_total.prompt_tokens,
           completion_tokens: (prev?.completion_tokens ?? 0) + live.run_total.completion_tokens,
           total_tokens: (prev?.total_tokens ?? 0) + live.run_total.total_tokens,
+          cached_tokens: (prev?.cached_tokens ?? 0) + live.run_total.cached_tokens,
         }));
         setUsage(null);
       }
@@ -295,11 +296,21 @@ export function ChatView({ sessionId }: ChatViewProps) {
     [],
   );
 
-  // 会话累计 token：历史累计 + 本轮实时累计；两者都未知时展示未记录
-  const sessionTokens =
+  // 会话累计用量：历史累计 + 本轮实时累计；两者都未知时展示未记录
+  const sessionUsage: TraceUsage | null =
     persistedUsage === null && usage === null
       ? null
-      : (persistedUsage?.total_tokens ?? 0) + (usage?.run_total.total_tokens ?? 0);
+      : {
+          prompt_tokens:
+            (persistedUsage?.prompt_tokens ?? 0) + (usage?.run_total.prompt_tokens ?? 0),
+          completion_tokens:
+            (persistedUsage?.completion_tokens ?? 0) +
+            (usage?.run_total.completion_tokens ?? 0),
+          total_tokens:
+            (persistedUsage?.total_tokens ?? 0) + (usage?.run_total.total_tokens ?? 0),
+          cached_tokens:
+            (persistedUsage?.cached_tokens ?? 0) + (usage?.run_total.cached_tokens ?? 0),
+        };
 
   if (sessionId === null) {
     return (
@@ -345,7 +356,7 @@ export function ChatView({ sessionId }: ChatViewProps) {
         </ThreadPrimitive.Root>
         <div className="chat-status-area">
           <RunStatusBar runStatus={runStatus} />
-          <UsageBar tokens={sessionTokens} />
+          <UsageBar usage={sessionUsage} />
         </div>
         {(plan !== null || approvals.length > 0 || stopError !== null || chat.error) && (
           <div className="chat-panels">

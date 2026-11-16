@@ -208,6 +208,7 @@ def test_usage_accumulates_run_total():
         "prompt_tokens": 10,
         "completion_tokens": 5,
         "total_tokens": 15,
+        "cached_tokens": 0,
         "latency_ms": 120.5,
     }
 
@@ -226,6 +227,7 @@ def test_usage_accumulates_run_total():
         "prompt_tokens": 30,
         "completion_tokens": 12,
         "total_tokens": 42,
+        "cached_tokens": 0,
         "latency_ms": 200.5,
     }
 

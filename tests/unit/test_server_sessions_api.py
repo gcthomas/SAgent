@@ -253,6 +253,7 @@ def _seed_trace_session(store: SessionStore) -> str:
             prompt_tokens=10,
             completion_tokens=5,
             total_tokens=15,
+            cached_tokens=7,
             outcome="completed",
             mode="react",
         )
@@ -320,6 +321,7 @@ def test_list_messages_returns_full_rows(client):
         "prompt_tokens": 10,
         "completion_tokens": 5,
         "total_tokens": 15,
+        "cached_tokens": 7,
     }
 
 
@@ -361,6 +363,7 @@ def test_trace_builds_turns_usage_and_compactions(client):
         "prompt_tokens": 10,
         "completion_tokens": 5,
         "total_tokens": 15,
+        "cached_tokens": 7,
     }
 
     first, second, third = body["turns"]
@@ -375,6 +378,7 @@ def test_trace_builds_turns_usage_and_compactions(client):
         "prompt_tokens": 10,
         "completion_tokens": 5,
         "total_tokens": 15,
+        "cached_tokens": 7,
     }
     assert first["user"] == {
         "seq": 2,
@@ -483,6 +487,7 @@ def test_trace_ignores_plan_step_instructions(client):
         "prompt_tokens": 20,
         "completion_tokens": 10,
         "total_tokens": 30,
+        "cached_tokens": 0,
     }
     assert turn["assistant_text"] == "查询结果\n\n最终日报"
 

@@ -21,7 +21,7 @@ logger = get_logger(__name__)
 # turns 表的查询列顺序，供 append_turn / list_turns 复用
 _TURN_COLUMNS = (
     "session_id, turn_index, started_at, finished_at, duration_ms, "
-    "prompt_tokens, completion_tokens, total_tokens, outcome, mode"
+    "prompt_tokens, completion_tokens, total_tokens, cached_tokens, outcome, mode"
 )
 
 
@@ -150,12 +150,21 @@ class SessionStore:
                     prompt_tokens INTEGER NOT NULL DEFAULT 0,
                     completion_tokens INTEGER NOT NULL DEFAULT 0,
                     total_tokens INTEGER NOT NULL DEFAULT 0,
+                    cached_tokens INTEGER NOT NULL DEFAULT 0,
                     outcome TEXT NOT NULL,
                     mode TEXT NOT NULL,
                     FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
                 )
                 """
             )
+            # 旧库补齐缓存命中用量列
+            turn_columns = {
+                row["name"] for row in self._conn.execute("PRAGMA table_info(turns)")
+            }
+            if "cached_tokens" not in turn_columns:
+                self._conn.execute(
+                    "ALTER TABLE turns ADD COLUMN cached_tokens INTEGER NOT NULL DEFAULT 0"
+                )
             # 唯一索引避免同一会话重复写入相同轮次
             self._conn.execute(
                 """
@@ -794,8 +803,9 @@ class SessionStore:
                 """
                 INSERT INTO turns
                     (session_id, turn_index, started_at, finished_at, duration_ms,
-                     prompt_tokens, completion_tokens, total_tokens, outcome, mode)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     prompt_tokens, completion_tokens, total_tokens, cached_tokens,
+                     outcome, mode)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     turn.session_id,
@@ -806,6 +816,7 @@ class SessionStore:
                     turn.prompt_tokens,
                     turn.completion_tokens,
                     turn.total_tokens,
+                    turn.cached_tokens,
                     turn.outcome,
                     turn.mode,
                 ),
@@ -842,6 +853,7 @@ class SessionStore:
                 prompt_tokens=row["prompt_tokens"],
                 completion_tokens=row["completion_tokens"],
                 total_tokens=row["total_tokens"],
+                cached_tokens=row["cached_tokens"],
                 outcome=row["outcome"],
                 mode=row["mode"],
             )
@@ -878,14 +890,14 @@ class SessionStore:
             cur.close()
         return int(row["n"]) if row is not None else 0
 
-    def sum_turn_tokens(self, session_id: str) -> tuple[int, int, int] | None:
+    def sum_turn_tokens(self, session_id: str) -> tuple[int, int, int, int] | None:
         """返回会话全部轮次的 token 用量合计。
 
         参数:
             session_id: 会话唯一标识
 
         返回:
-            (prompt_tokens, completion_tokens, total_tokens) 三元组；
+            (prompt_tokens, completion_tokens, total_tokens, cached_tokens) 四元组；
             会话没有任何轮次记录时返回 None
         """
         with self._lock:
@@ -894,7 +906,8 @@ class SessionStore:
                 SELECT COUNT(*) AS n,
                        COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens,
                        COALESCE(SUM(completion_tokens), 0) AS completion_tokens,
-                       COALESCE(SUM(total_tokens), 0) AS total_tokens
+                       COALESCE(SUM(total_tokens), 0) AS total_tokens,
+                       COALESCE(SUM(cached_tokens), 0) AS cached_tokens
                 FROM turns
                 WHERE session_id = ?
                 """,
@@ -908,6 +921,7 @@ class SessionStore:
             int(row["prompt_tokens"]),
             int(row["completion_tokens"]),
             int(row["total_tokens"]),
+            int(row["cached_tokens"]),
         )
 
     def query_rows(self, sql: str, params: tuple[Any, ...]) -> list[dict[str, Any]]:

@@ -19,6 +19,23 @@ from ..observability.content import is_content_capture_enabled, truncate_content
 logger = get_logger(__name__)
 
 
+def _read_cached_tokens(usage: Any) -> int | None:
+    """读取缓存命中的 prompt token 数。
+
+    OpenAI 兼容接口在 prompt_tokens_details.cached_tokens 中上报缓存命中量；
+    未上报该字段时返回 None，表示该服务没有提供缓存用量。
+
+    参数:
+        usage: LLM API 返回的 usage 对象
+
+    返回:
+        缓存命中的 prompt token 数；未上报时为 None
+    """
+    details = getattr(usage, "prompt_tokens_details", None)
+    cached = getattr(details, "cached_tokens", None) if details is not None else None
+    return int(cached) if cached is not None else None
+
+
 class LLMResponse:
     """统一的 LLM 响应结构。"""
 
@@ -210,11 +227,15 @@ class LLMClient:
     def _usage_dict(usage: Any) -> dict[str, int] | None:
         if usage is None:
             return None
-        return {
+        result = {
             "prompt_tokens": usage.prompt_tokens,
             "completion_tokens": usage.completion_tokens,
             "total_tokens": usage.total_tokens,
         }
+        cached = _read_cached_tokens(usage)
+        if cached is not None:
+            result["cached_tokens"] = cached
+        return result
 
     @staticmethod
     def _emit(callback: StreamCallback | None, event: LLMStreamEvent) -> None:

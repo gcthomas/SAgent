@@ -285,6 +285,7 @@ def list_messages(session_id: str, request: Request) -> MessageListResponse:
             prompt_tokens=totals[0],
             completion_tokens=totals[1],
             total_tokens=totals[2],
+            cached_tokens=totals[3],
         )
         if totals is not None
         else None

@@ -140,6 +140,7 @@ def _run_turn(
             completion_tokens=usage_after["completion_tokens"]
             - usage_before["completion_tokens"],
             total_tokens=usage_after["total_tokens"] - usage_before["total_tokens"],
+            cached_tokens=usage_after["cached_tokens"] - usage_before["cached_tokens"],
             outcome=status,
             mode=active.engine.last_mode,
         )

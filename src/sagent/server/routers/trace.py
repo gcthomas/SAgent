@@ -219,6 +219,7 @@ def _usage_from_record(record: TurnRecord) -> UsageInfo:
         prompt_tokens=record.prompt_tokens,
         completion_tokens=record.completion_tokens,
         total_tokens=record.total_tokens,
+        cached_tokens=record.cached_tokens,
     )
 
 
@@ -322,6 +323,7 @@ def get_trace(session_id: str, request: Request) -> TraceResponse:
             prompt_tokens=sum(record.prompt_tokens for record in records),
             completion_tokens=sum(record.completion_tokens for record in records),
             total_tokens=sum(record.total_tokens for record in records),
+            cached_tokens=sum(record.cached_tokens for record in records),
         )
     else:
         usage = None

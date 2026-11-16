@@ -35,6 +35,19 @@ def _client(monkeypatch, stream=True):
     return client
 
 
+def test_usage_dict_reads_cached_tokens(monkeypatch):
+    """缓存命中数量读取 prompt_tokens_details.cached_tokens，未上报时不写入该键。"""
+    client = _client(monkeypatch)
+    usage = SimpleNamespace(
+        prompt_tokens=10,
+        completion_tokens=2,
+        total_tokens=12,
+        prompt_tokens_details=SimpleNamespace(cached_tokens=6),
+    )
+    assert client._usage_dict(usage)["cached_tokens"] == 6
+    assert "cached_tokens" not in client._usage_dict(_usage())
+
+
 def test_stream_chat_emits_text_and_usage(monkeypatch):
     client = _client(monkeypatch)
     chunks = [

@@ -101,6 +101,10 @@ class UsageInfo(BaseModel):
     prompt_tokens: int = Field(..., description="prompt token 用量")
     completion_tokens: int = Field(..., description="completion token 用量")
     total_tokens: int = Field(..., description="总 token 用量")
+    cached_tokens: int = Field(
+        default=0,
+        description="prompt 中命中缓存的 token 用量，未上报缓存用量的服务为 0",
+    )
 
 
 class MessageListResponse(BaseModel):

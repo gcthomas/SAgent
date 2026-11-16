@@ -94,6 +94,8 @@ class TurnRecord(BaseModel):
     completion_tokens: int = Field(default=0, description="completion token 用量")
     # 总 token 用量
     total_tokens: int = Field(default=0, description="总 token 用量")
+    # 缓存命中的 prompt token 用量
+    cached_tokens: int = Field(default=0, description="缓存命中的 prompt token 用量")
     # 本轮结果状态（completed/failed/cancelled）
     outcome: str = Field(..., description="本轮结果状态（completed/failed/cancelled）")
     # 执行模式（react/plan）

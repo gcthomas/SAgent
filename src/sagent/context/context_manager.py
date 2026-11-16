@@ -61,6 +61,8 @@ class ContextManager:
             "prompt_tokens": 0,
             "completion_tokens": 0,
             "total_tokens": 0,
+            # 缓存命中的 prompt token 数，未上报缓存用量的服务保持为 0
+            "cached_tokens": 0,
         }
 
         # 初始化策略实例
@@ -119,7 +121,7 @@ class ContextManager:
         """
         if usage is not None:
             # 入口处累计用量，缺失字段按 0 计入，供 usage_snapshot 读取
-            for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
+            for key in ("prompt_tokens", "completion_tokens", "total_tokens", "cached_tokens"):
                 value = usage.get(key)
                 if isinstance(value, int):
                     self._usage_totals[key] += value

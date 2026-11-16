@@ -32,6 +32,7 @@ def test_usage_snapshot_accumulates_and_returns_copy():
         "prompt_tokens": 10,
         "completion_tokens": 5,
         "total_tokens": 15,
+        "cached_tokens": 0,
     }
 
     cm.record_llm_usage(
@@ -42,12 +43,14 @@ def test_usage_snapshot_accumulates_and_returns_copy():
         "prompt_tokens": 17,
         "completion_tokens": 8,
         "total_tokens": 25,
+        "cached_tokens": 0,
     }
     # 先前的快照不随后续累计变化
     assert first == {
         "prompt_tokens": 10,
         "completion_tokens": 5,
         "total_tokens": 15,
+        "cached_tokens": 0,
     }
 
     # 修改返回值不影响内部状态
@@ -81,6 +84,7 @@ def test_usage_snapshot_accumulates_without_calibration():
         "prompt_tokens": 12,
         "completion_tokens": 4,
         "total_tokens": 16,
+        "cached_tokens": 0,
     }
     assert cm._calibrated_tokens is None
 
@@ -92,12 +96,14 @@ def test_usage_snapshot_handles_missing_fields_and_none():
         "prompt_tokens": 0,
         "completion_tokens": 0,
         "total_tokens": 0,
+        "cached_tokens": 0,
     }
     cm.record_llm_usage({"prompt_tokens": 9})
     assert cm.usage_snapshot() == {
         "prompt_tokens": 9,
         "completion_tokens": 0,
         "total_tokens": 0,
+        "cached_tokens": 0,
     }
     cm.record_llm_usage(None)
     assert cm.usage_snapshot()["prompt_tokens"] == 9

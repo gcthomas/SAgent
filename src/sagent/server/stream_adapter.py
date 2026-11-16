@@ -226,6 +226,8 @@ class UIStreamAdapter:
             "prompt_tokens": 0,
             "completion_tokens": 0,
             "total_tokens": 0,
+            # 缓存命中的 prompt token 数
+            "cached_tokens": 0,
             "latency_ms": 0.0,
         }
 
@@ -376,6 +378,7 @@ class UIStreamAdapter:
                     "prompt_tokens": int(self._usage_totals["prompt_tokens"]),
                     "completion_tokens": int(self._usage_totals["completion_tokens"]),
                     "total_tokens": int(self._usage_totals["total_tokens"]),
+                    "cached_tokens": int(self._usage_totals["cached_tokens"]),
                 },
             }
         )
@@ -429,10 +432,12 @@ class UIStreamAdapter:
         prompt_tokens = int(usage.get("prompt_tokens") or 0)
         completion_tokens = int(usage.get("completion_tokens") or 0)
         total_tokens = int(usage.get("total_tokens") or 0)
+        cached_tokens = int(usage.get("cached_tokens") or 0)
 
         self._usage_totals["prompt_tokens"] += prompt_tokens
         self._usage_totals["completion_tokens"] += completion_tokens
         self._usage_totals["total_tokens"] += total_tokens
+        self._usage_totals["cached_tokens"] += cached_tokens
         if event.latency_ms is not None:
             self._usage_totals["latency_ms"] = round(
                 self._usage_totals["latency_ms"] + event.latency_ms, 1
@@ -446,6 +451,7 @@ class UIStreamAdapter:
                     "prompt_tokens": prompt_tokens,
                     "completion_tokens": completion_tokens,
                     "total_tokens": total_tokens,
+                    "cached_tokens": cached_tokens,
                     "latency_ms": event.latency_ms,
                     "run_total": {
                         "prompt_tokens": int(self._usage_totals["prompt_tokens"]),
@@ -453,6 +459,7 @@ class UIStreamAdapter:
                             self._usage_totals["completion_tokens"]
                         ),
                         "total_tokens": int(self._usage_totals["total_tokens"]),
+                        "cached_tokens": int(self._usage_totals["cached_tokens"]),
                         "latency_ms": self._usage_totals["latency_ms"],
                     },
                 },

@@ -56,6 +56,8 @@ export interface TraceUsage {
   prompt_tokens: number;
   completion_tokens: number;
   total_tokens: number;
+  // prompt 中命中缓存的 token 数，未上报缓存用量时为 0
+  cached_tokens: number;
 }
 
 // 轨迹轮次中的用户输入

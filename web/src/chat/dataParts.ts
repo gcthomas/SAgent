@@ -57,6 +57,8 @@ export interface UsageTotals {
   prompt_tokens: number;
   completion_tokens: number;
   total_tokens: number;
+  // prompt 中命中缓存的 token 数，未上报缓存用量时为 0
+  cached_tokens: number;
   latency_ms: number;
 }
 
@@ -66,6 +68,7 @@ export interface UsageData {
   prompt_tokens: number;
   completion_tokens: number;
   total_tokens: number;
+  cached_tokens: number;
   latency_ms: number | null;
   run_total: UsageTotals;
 }
@@ -92,6 +95,8 @@ export interface TurnUsageData {
   prompt_tokens: number;
   completion_tokens: number;
   total_tokens: number;
+  // prompt 中命中缓存的 token 数
+  cached_tokens: number;
 }
 
 // 后端 data 部件名称到数据类型的映射
