@@ -187,6 +187,11 @@ class ContextManager:
             return self._calibrated_tokens
         return count_tokens(self._messages, self._summary_model, self._config.token_counter_method)
 
+    @property
+    def max_context_tokens(self) -> int:
+        """上下文窗口上限 token 数。"""
+        return self._config.max_context_tokens
+
     def ensure_system_prompt(self, prompt: str) -> None:
         """确保系统提示词是消息列表的第一条。如果不存在则插入到开头。
 

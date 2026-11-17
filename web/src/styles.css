@@ -548,6 +548,11 @@ button {
   color: var(--text-secondary);
 }
 
+/* 气泡内第二段标题（上下文占用）与上方明细拉开距离 */
+.usage-popover-title:not(:first-child) {
+  margin-top: 4px;
+}
+
 .usage-row {
   display: flex;
   justify-content: space-between;

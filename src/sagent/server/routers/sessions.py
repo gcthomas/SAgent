@@ -19,6 +19,7 @@ from ...session.models import SessionMeta
 from ...session.store import SessionStore
 from ..runtime import RuntimeRegistry, SessionNotFoundError
 from ..schemas import (
+    ContextInfo,
     MessageItem,
     MessageListResponse,
     SessionCreateRequest,
@@ -290,4 +291,15 @@ def list_messages(session_id: str, request: Request) -> MessageListResponse:
         if totals is not None
         else None
     )
-    return MessageListResponse(messages=messages, usage=usage)
+    # 上下文占用只在服务端已存在该会话运行时时可读，避免为只读接口创建运行时
+    runtimes: RuntimeRegistry | None = request.app.state.runtimes
+    runtime = runtimes.get(session_id) if runtimes is not None else None
+    context = (
+        ContextInfo(
+            used_tokens=runtime.context_manager.token_count,
+            max_tokens=runtime.context_manager.max_context_tokens,
+        )
+        if runtime is not None
+        else None
+    )
+    return MessageListResponse(messages=messages, usage=usage, context=context)

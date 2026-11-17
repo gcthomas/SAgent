@@ -5,7 +5,7 @@ import type { DataUIPart } from 'ai';
 import { useChat } from '@ai-sdk/react';
 import { AssistantRuntimeProvider, ThreadPrimitive } from '@assistant-ui/react';
 import { useAISDKRuntime } from '@assistant-ui/react-ai-sdk';
-import type { ApprovalAction, TraceUsage } from '../api/types';
+import type { ApprovalAction, ContextInfo, TraceUsage } from '../api/types';
 import { cancelRun, decideApproval, listMessages } from '../api/client';
 import { ApiRequestError } from '../api/client';
 import type {
@@ -117,6 +117,8 @@ export function ChatView({ sessionId }: ChatViewProps) {
   const usageRef = useRef<UsageData | null>(null);
   // 本轮耗时与 token 用量，在助手消息下方展示
   const [turnUsage, setTurnUsage] = useState<TurnUsageData | null>(null);
+  // 当前上下文占用：来自历史消息接口或本轮 data-context 部件
+  const [contextUsage, setContextUsage] = useState<ContextInfo | null>(null);
   const [approvals, setApprovals] = useState<ApprovalData[]>([]);
   const [stopping, setStopping] = useState(false);
   const [stopError, setStopError] = useState<string | null>(null);
@@ -154,6 +156,12 @@ export function ChatView({ sessionId }: ChatViewProps) {
         break;
       case 'data-turn-usage':
         setTurnUsage(part.data);
+        break;
+      case 'data-context':
+        setContextUsage({
+          used_tokens: part.data.used_tokens,
+          max_tokens: part.data.max_tokens,
+        });
         break;
       case 'data-approval':
         setApprovals((prev) => upsertApproval(prev, part.data));
@@ -215,6 +223,8 @@ export function ChatView({ sessionId }: ChatViewProps) {
           chat.setMessages(buildHistoryMessages(data.messages));
           // 历史累计用量以消息接口返回的轮次合计为准
           setPersistedUsage(data.usage ?? null);
+          // 上下文占用仅在服务端已存在该会话运行时时返回，否则先隐藏
+          setContextUsage(data.context ?? null);
         }
       } catch (error) {
         if (!isCancelled()) {
@@ -239,6 +249,7 @@ export function ChatView({ sessionId }: ChatViewProps) {
     usageRef.current = null;
     setPersistedUsage(null);
     setTurnUsage(null);
+    setContextUsage(null);
     setApprovals([]);
     setStopping(false);
     setStopError(null);
@@ -356,7 +367,7 @@ export function ChatView({ sessionId }: ChatViewProps) {
         </ThreadPrimitive.Root>
         <div className="chat-status-area">
           <RunStatusBar runStatus={runStatus} />
-          <UsageBar usage={sessionUsage} />
+          <UsageBar usage={sessionUsage} context={contextUsage} />
         </div>
         {(plan !== null || approvals.length > 0 || stopError !== null || chat.error) && (
           <div className="chat-panels">

@@ -49,6 +49,16 @@ export interface SessionMessagesResponse {
   messages: SessionMessage[];
   // 会话累计 token 用量（全部轮次合计），无轮次记录时为 null
   usage: TraceUsage | null;
+  // 当前上下文占用，服务端尚未创建该会话运行时为 null
+  context: ContextInfo | null;
+}
+
+// 当前上下文占用
+export interface ContextInfo {
+  // 当前上下文已用 token 估算值
+  used_tokens: number;
+  // 上下文窗口上限 token 数
+  max_tokens: number;
 }
 
 // 轨迹中的 token 用量

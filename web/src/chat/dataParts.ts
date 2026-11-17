@@ -99,6 +99,15 @@ export interface TurnUsageData {
   cached_tokens: number;
 }
 
+// data-context 部件数据：当前上下文占用
+export interface ContextData {
+  run_id: string;
+  // 当前上下文已用 token 估算值
+  used_tokens: number;
+  // 上下文窗口上限 token 数
+  max_tokens: number;
+}
+
 // 后端 data 部件名称到数据类型的映射
 // 使用类型别名以便满足 UIDataTypes 的隐式索引签名约束
 export type SAgentDataParts = {
@@ -107,6 +116,7 @@ export type SAgentDataParts = {
   usage: UsageData;
   approval: ApprovalData;
   'turn-usage': TurnUsageData;
+  context: ContextData;
 };
 
 // 对话使用的 UI 消息类型

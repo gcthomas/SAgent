@@ -236,6 +236,41 @@ def test_usage_accumulates_run_total():
     assert of_type(parts, "data-usage") == []
 
 
+def test_context_snapshot_frames():
+    """提供 context_snapshot 时，llm_completed 与 close 各下发一次 data-context。"""
+    snapshots = [{"used_tokens": 1200, "max_tokens": 128000}]
+    adapter = UIStreamAdapter(run_id="run-ctx", context_snapshot=lambda: snapshots[0])
+    parts = parse_frames(
+        adapter.handle(
+            AgentEvent(
+                "llm_completed",
+                usage={"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+                latency_ms=10.0,
+            )
+        )
+    )
+    assert of_type(parts, "data-context") == [
+        {
+            "type": "data-context",
+            "data": {"run_id": "run-ctx", "used_tokens": 1200, "max_tokens": 128000},
+        }
+    ]
+
+    # 本轮结束后上下文继续增长，close 时下发最新占用
+    snapshots[0] = {"used_tokens": 3400, "max_tokens": 128000}
+    parts = parse_frames(adapter.close("completed"))
+    assert of_type(parts, "data-context")[-1]["data"]["used_tokens"] == 3400
+
+
+def test_context_snapshot_absent_emits_nothing():
+    """未提供 context_snapshot 时不下发 data-context。"""
+    adapter = UIStreamAdapter(run_id="run-no-ctx")
+    parts = parse_frames(adapter.handle(AgentEvent("llm_completed")))
+    assert of_type(parts, "data-context") == []
+    parts = parse_frames(adapter.close("completed"))
+    assert of_type(parts, "data-context") == []
+
+
 def _build_plan_state() -> PlanState:
     """构造 3 步计划：第 1 步完成、第 2 步执行中、第 3 步待执行。"""
     return PlanState(

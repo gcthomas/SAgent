@@ -223,11 +223,21 @@ async def send_message(
 
     # 运行 id 由运行时生成；适配器与取消接口必须使用同一个 id
     run_id = active.run_id
+
+    def _context_snapshot() -> dict[str, int]:
+        """读取当前上下文占用：已用 token 估算值与窗口上限。"""
+        manager = runtime.context_manager
+        return {
+            "used_tokens": manager.token_count,
+            "max_tokens": manager.max_context_tokens,
+        }
+
     adapter = UIStreamAdapter(
         run_id=run_id,
         message_id=payload.message_id,
         session_id=session_id,
         plan_snapshot=runtime.session_manager.get_active_plan,
+        context_snapshot=_context_snapshot,
     )
     outcome = RunOutcome()
 

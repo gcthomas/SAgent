@@ -323,6 +323,8 @@ def test_list_messages_returns_full_rows(client):
         "total_tokens": 15,
         "cached_tokens": 7,
     }
+    # 只读消息接口不为会话创建运行时，因此上下文占用为空
+    assert body["context"] is None
 
 
 def test_list_messages_without_turns_returns_no_usage(client):

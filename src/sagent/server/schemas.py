@@ -107,6 +107,13 @@ class UsageInfo(BaseModel):
     )
 
 
+class ContextInfo(BaseModel):
+    """当前上下文占用。"""
+
+    used_tokens: int = Field(..., description="当前上下文已用 token 估算值")
+    max_tokens: int = Field(..., description="上下文窗口上限 token 数")
+
+
 class MessageListResponse(BaseModel):
     """会话历史消息响应。"""
 
@@ -114,6 +121,10 @@ class MessageListResponse(BaseModel):
     usage: UsageInfo | None = Field(
         default=None,
         description="会话累计 token 用量（全部轮次合计），无轮次记录时为 None",
+    )
+    context: ContextInfo | None = Field(
+        default=None,
+        description="当前上下文占用，仅在服务端已存在该会话运行时可用，否则为 None",
     )
 
 

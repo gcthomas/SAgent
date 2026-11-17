@@ -265,6 +265,8 @@ SAgent 当前只能通过 CLI 交互，会话管理、运行状态、计划进�
 - 历史消息接口（`GET /api/sessions/{id}/messages`）同时返回会话累计用量；前端以历史累计加本轮实时累计展示，本轮结束后把实时用量折叠进历史累计，避免显示回退为"未记录"或重复计数。
 - `cached_tokens` 从 OpenAI 兼容接口的 `prompt_tokens_details.cached_tokens` 读取，服务未上报时为 0。
 - 用量栏摘要展示会话累计总 token 与缓存命中率（`cached_tokens / prompt_tokens`），数字使用千分位分隔；点击摘要展开气泡，展示输入 token、命中缓存、未命中缓存、输出 token 与总 token。
+- 用量栏摘要同时展示上下文使用比例（`used_tokens / max_tokens`，保留一位小数），气泡内展示已用 token、窗口上限与百分比明细，数字使用千分位分隔。
+- 上下文占用取自会话运行时的 `ContextManager`（`token_count` 与 `max_context_tokens`）：运行中经 `data-context` 部件在每次 `llm_completed` 后与流关闭时下发，历史消息接口在服务端已存在该会话运行时时返回 `context` 字段；未创建运行时时不展示上下文占用，不为只读接口创建运行时，也不虚构历史估算值。
 
 #### Scenario: 单轮用量
 

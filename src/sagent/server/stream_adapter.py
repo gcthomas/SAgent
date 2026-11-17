@@ -51,11 +51,13 @@
            "prompt_tokens": int,
            "completion_tokens": int,
            "total_tokens": int,
+           "cached_tokens": int,          # 本次请求命中缓存的 prompt token 数
            "latency_ms": float | null,    # 本次 LLM 请求耗时
            "run_total": {
                "prompt_tokens": int,      # 本次 run 累计
                "completion_tokens": int,
                "total_tokens": int,
+               "cached_tokens": int,
                "latency_ms": float        # 本次 run 累计请求耗时
            }
        }}
@@ -79,7 +81,16 @@
            "duration_ms": float | null,   # 本轮总耗时
            "prompt_tokens": int,          # 本轮 LLM 用量合计
            "completion_tokens": int,
-           "total_tokens": int
+           "total_tokens": int,
+           "cached_tokens": int
+       }}
+
+6. ``data-context``（``llm_completed`` 后与 ``close()`` 时下发，仅在 ``context_snapshot`` 返回非 None 时）::
+
+       {"type": "data-context", "data": {
+           "run_id": str,
+           "used_tokens": int,            # 当前上下文已用 token 估算数
+           "max_tokens": int              # 上下文窗口上限 token 数
        }}
 
 运行状态推导规则：
@@ -196,6 +207,7 @@ class UIStreamAdapter:
         message_id: str | None = None,
         plan_snapshot: Callable[[], Any] | None = None,
         session_id: str = "",
+        context_snapshot: Callable[[], dict[str, int]] | None = None,
     ) -> None:
         """初始化适配器。
 
@@ -205,11 +217,14 @@ class UIStreamAdapter:
             plan_snapshot: 可选回调，返回当前 PlanState（或可序列化对象）；
                 为 None 或返回 None 时不下发 data-plan。
             session_id: 会话 id，写入 data-run-status。
+            context_snapshot: 可选回调，返回 ``{"used_tokens", "max_tokens"}``；
+                为 None 时不下发 data-context。
         """
         self.run_id = run_id
         self.message_id = message_id or run_id
         self.session_id = session_id
         self._plan_snapshot = plan_snapshot
+        self._context_snapshot = context_snapshot
         self._start_perf = time.perf_counter()
         self._started = False
         self._closed = False
@@ -307,6 +322,10 @@ class UIStreamAdapter:
         elif event_type == "llm_completed":
             if event.usage:
                 frames.append(self._usage_frame(event))
+            # 每次 LLM 返回后刷新上下文占用，前端即时展示使用比例
+            context_frame = self._context_frame()
+            if context_frame is not None:
+                frames.append(context_frame)
         elif event_type == "approval_required":
             frames.append(self._approval_frame(event, "pending"))
             frames.extend(self._transition("waiting_approval", force=True))
@@ -358,6 +377,10 @@ class UIStreamAdapter:
         if message is not None:
             self._message = message
         frames.append(self._run_status_frame())
+        # 终态前再取一次上下文快照，确保前端拿到本轮结束后的准确占用
+        context_frame = self._context_frame()
+        if context_frame is not None:
+            frames.append(context_frame)
         frames.append(self._turn_usage_frame())
         frames.append(_frame({"type": "finish"}))
         frames.append(_DONE_FRAME)
@@ -462,6 +485,27 @@ class UIStreamAdapter:
                         "cached_tokens": int(self._usage_totals["cached_tokens"]),
                         "latency_ms": self._usage_totals["latency_ms"],
                     },
+                },
+            }
+        )
+
+    def _context_frame(self) -> str | None:
+        """构造 data-context 帧：当前上下文已用 token 与窗口上限。
+
+        未提供 context_snapshot 回调时返回 None，不下发该部件。
+        """
+        if self._context_snapshot is None:
+            return None
+        snapshot = self._context_snapshot()
+        if snapshot is None:
+            return None
+        return _frame(
+            {
+                "type": "data-context",
+                "data": {
+                    "run_id": self.run_id,
+                    "used_tokens": int(snapshot["used_tokens"]),
+                    "max_tokens": int(snapshot["max_tokens"]),
                 },
             }
         )
